@@ -30,6 +30,8 @@ func NewHub(natsClient *nats.NATSClient) *Hub {
 
 // Run starts the Hub's main loop for handling connections and broadcasts.
 func (h *Hub) Run() {
+	go h.subscribeToNATS() // Start listening for messages on NATS
+
 	for {
 		select {
 		case conn := <-h.register:
@@ -39,6 +41,16 @@ func (h *Hub) Run() {
 		case msg := <-h.broadcast:
 			h.broadcastMessage(msg)
 		}
+	}
+}
+
+// subscribeToNATS subscribes to the "chat.events" subject and broadcasts messages to WebSocket clients.
+func (h *Hub) subscribeToNATS() {
+	err := h.natsClient.Subscribe("chat.events", func(msg domain.ChatMessage) {
+		h.Broadcast(msg) // Queue the message for broadcasting to clients
+	})
+	if err != nil {
+		panic("Failed to subscribe to NATS: " + err.Error())
 	}
 }
 

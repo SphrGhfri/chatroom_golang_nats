@@ -8,82 +8,76 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Upgrader for WebSocket connections
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins for testing; restrict in production.
 	},
 }
 
-// Connection represents a single WebSocket client.
+// Connection represents a single WebSocket connection to a client.
 type Connection struct {
-	ws     *websocket.Conn         // WebSocket connection
-	send   chan domain.ChatMessage // Channel for sending messages to the client
-	hub    *Hub                    // Reference to the Hub
-	closed chan struct{}           // Signal channel for closing
+	ws   *websocket.Conn         // WebSocket connection
+	send chan domain.ChatMessage // Channel for sending messages to the client
+	hub  *Hub                    // Reference to the Hub managing this connection
 }
 
-// ServeWS upgrades HTTP to WebSocket and registers the connection with the Hub.
+// ServeWS upgrades an HTTP connection to a WebSocket connection and registers it with the Hub.
 func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	ws, err := upgrader.Upgrade(w, r, nil)
+	// Upgrade HTTP to WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade WebSocket: %v", err)
+		log.Printf("[CONNECTION] Failed to upgrade WebSocket: %v", err)
 		http.Error(w, "Failed to upgrade WebSocket", http.StatusInternalServerError)
 		return
 	}
 
-	conn := &Connection{
-		ws:     ws,
-		send:   make(chan domain.ChatMessage, 256),
-		hub:    hub,
-		closed: make(chan struct{}),
+	client := &Connection{
+		ws:   conn,
+		send: make(chan domain.ChatMessage, 256), // Buffered channel for outgoing messages
+		hub:  hub,
 	}
 
-	hub.register <- conn
-	log.Printf("New WebSocket connection: %s", ws.RemoteAddr())
+	// Register the client with the Hub
+	hub.register <- client
+	log.Printf("[CONNECTION] New WebSocket connection: %s", conn.RemoteAddr())
 
-	go conn.readMessages()
-	go conn.writeMessages()
+	// Start the read and write pumps
+	go client.readPump()
+	go client.writePump()
 }
 
-// readMessages handles incoming messages from the WebSocket client.
-func (c *Connection) readMessages() {
-	defer c.close()
+// readPump listens for incoming messages from the WebSocket and forwards them to the Hub.
+func (c *Connection) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.ws.Close()
+	}()
 
 	for {
 		var msg domain.ChatMessage
-		if err := c.ws.ReadJSON(&msg); err != nil {
-			log.Printf("Error reading message: %v", err)
+		err := c.ws.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("[CONNECTION] Error reading message: %v", err)
 			break
 		}
 
 		// Publish the message to NATS
-		if err := c.hub.natsClient.Publish("chat.events", msg); err != nil {
-			log.Printf("Failed to publish message to NATS: %v", err)
+		err = c.hub.natsClient.Publish("chat.events", msg)
+		if err != nil {
+			log.Printf("[CONNECTION] Failed to publish message to NATS: %v", err)
 		}
 	}
 }
 
-// writeMessages sends messages to the WebSocket client.
-func (c *Connection) writeMessages() {
-	defer c.close()
+// writePump listens on the send channel and sends messages to the WebSocket.
+func (c *Connection) writePump() {
+	defer c.ws.Close()
 
-	for {
-		select {
-		case msg := <-c.send:
-			if err := c.ws.WriteJSON(msg); err != nil {
-				log.Printf("Error sending message: %v", err)
-				return
-			}
-		case <-c.closed:
-			return
+	for msg := range c.send {
+		err := c.ws.WriteJSON(msg)
+		if err != nil {
+			log.Printf("[CONNECTION] Error sending message: %v", err)
+			break
 		}
 	}
-}
-
-// close unregisters the connection and closes resources.
-func (c *Connection) close() {
-	c.hub.unregister <- c
-	c.ws.Close()
-	close(c.closed)
 }
