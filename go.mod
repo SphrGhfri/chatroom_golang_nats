@@ -3,6 +3,7 @@ module github.com/SphrGhfri/chatroom_golang_nats
 go 1.23.1
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.34.0
 	github.com/spf13/viper v1.19.0
 )

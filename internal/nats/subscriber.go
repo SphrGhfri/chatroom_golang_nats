@@ -16,7 +16,6 @@ func (c *NATSClient) Subscribe(subject string, handleFunc func(domain.ChatMessag
 			return
 		}
 
-		// Handle the received message
 		handleFunc(chatMessage)
 	})
 
