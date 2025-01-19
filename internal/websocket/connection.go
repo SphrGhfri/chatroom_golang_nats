@@ -3,8 +3,10 @@ package websocket
 import (
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
+	"github.com/SphrGhfri/chatroom_golang_nats/internal/redis"
 	"github.com/gorilla/websocket"
 )
 
@@ -16,13 +18,15 @@ var upgrader = websocket.Upgrader{
 
 // Connection represents a single WebSocket connection to a client.
 type Connection struct {
-	ws   *websocket.Conn         // WebSocket connection
-	send chan domain.ChatMessage // Channel for sending messages to the client
-	hub  *Hub                    // Reference to the Hub managing this connection
+	ws          *websocket.Conn         // WebSocket connection
+	send        chan domain.ChatMessage // Channel for sending messages to the client
+	hub         *Hub                    // Reference to the Hub managing this connection
+	redisClient *redis.RedisClient
+	username    string
 }
 
 // ServeWS upgrades an HTTP connection to a WebSocket connection and registers it with the Hub.
-func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
+func ServeWS(hub *Hub, redisClient *redis.RedisClient, w http.ResponseWriter, r *http.Request) {
 	// Upgrade HTTP to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -31,26 +35,40 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &Connection{
-		ws:   conn,
-		send: make(chan domain.ChatMessage, 256), // Buffered channel for outgoing messages
-		hub:  hub,
+	// Retrieve username from query parameter
+	username := r.URL.Query().Get("username")
+	if username == "" {
+		log.Printf("Username is required")
+		conn.Close()
+		return
 	}
 
+	client := &Connection{
+		ws:          conn,
+		send:        make(chan domain.ChatMessage, 256), // Buffered channel for outgoing messages
+		hub:         hub,
+		redisClient: redisClient,
+		username:    username,
+	}
+
+	// Add user to active users list
+	err = redisClient.AddActiveUser(username)
+	if err != nil {
+		log.Printf("Failed to add user to Redis: %v", err)
+	}
 	// Register the client with the Hub
 	hub.register <- client
-	log.Printf("[CONNECTION] New WebSocket connection: %s", conn.RemoteAddr())
+	log.Printf("[CONNECTION] New WebSocket connection: %s Username: %s", conn.RemoteAddr(), username)
 
-	// Start the read and write pumps
 	go client.readPump()
 	go client.writePump()
 }
 
-// readPump listens for incoming messages from the WebSocket and forwards them to the Hub.
 func (c *Connection) readPump() {
 	defer func() {
 		c.hub.unregister <- c
 		c.ws.Close()
+		c.redisClient.RemoveActiveUser(c.username)
 	}()
 
 	for {
@@ -59,6 +77,24 @@ func (c *Connection) readPump() {
 		if err != nil {
 			log.Printf("[CONNECTION] Error reading message: %v", err)
 			break
+		}
+
+		// Handle the #users command
+		if msg.Content == "#users" {
+			users, err := c.redisClient.GetActiveUsers()
+			if err != nil {
+				log.Printf("[CONNECTION] Failed to get active users from Redis: %v", err)
+				continue
+			}
+
+			response := domain.ChatMessage{
+				Sender:    "System",
+				Content:   "Active users: " + strings.Join(users, ", "),
+				Timestamp: msg.Timestamp,
+			}
+
+			c.send <- response
+			continue
 		}
 
 		// Publish the message to NATS

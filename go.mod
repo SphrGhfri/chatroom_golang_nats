@@ -5,10 +5,13 @@ go 1.23.1
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.34.0
+	github.com/redis/go-redis/v9 v9.7.0
 	github.com/spf13/viper v1.19.0
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/klauspost/compress v1.17.2 // indirect

@@ -28,7 +28,7 @@ func main() {
 
 	username := getUsername()
 
-	conn := connectWebSocket()
+	conn := connectWebSocket(username)
 	defer conn.Close()
 
 	// OS interrupt signals
@@ -50,8 +50,8 @@ func getUsername() string {
 	return scanner.Text()
 }
 
-func connectWebSocket() *websocket.Conn {
-	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
+func connectWebSocket(username string) *websocket.Conn {
+	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws", RawQuery: "username=" + url.QueryEscape(username)}
 	log.Printf("Connecting to %s", u.String())
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
@@ -96,8 +96,10 @@ func writeMessages(conn *websocket.Conn, username string, interrupt chan os.Sign
 			}
 			return
 		default:
+			// fmt.Print("Enter message: ")
 			if scanner.Scan() {
 				content := scanner.Text()
+
 				if content == "" {
 					continue
 				}
@@ -105,7 +107,7 @@ func writeMessages(conn *websocket.Conn, username string, interrupt chan os.Sign
 				message := ChatMessage{
 					Sender:    username,
 					Content:   content,
-					Timestamp: time.Now().Format(time.RFC3339),
+					Timestamp: time.Now().Format("2006-01-02 15:04:05"),
 				}
 
 				err := conn.WriteJSON(message)
