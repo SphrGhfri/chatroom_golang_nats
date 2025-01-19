@@ -45,6 +45,11 @@ func (r *RedisClient) GetActiveUsers() ([]string, error) {
 	return r.client.SMembers(r.ctx, "active_users").Result()
 }
 
+// ClearActiveUsers clears all active users from the set.
+func (r *RedisClient) ClearActiveUsers() error {
+	return r.client.Del(r.ctx, "active_users").Err()
+}
+
 // Close closes the Redis connection.
 func (r *RedisClient) Close() error {
 	return r.client.Close()

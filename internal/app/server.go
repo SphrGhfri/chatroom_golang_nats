@@ -20,6 +20,13 @@ func RunServer(cfg config.Config, log logger.Logger, natsClient *nats.NATSClient
 	}
 	defer redisClient.Close()
 
+	// Clear previous active users
+	err = redisClient.ClearActiveUsers()
+	if err != nil {
+		log.Fatalf("Failed to clear active users from Redis: %v", err)
+	}
+	log.Infof("Cleared active users on server startup.")
+
 	// Initialize WebSocket hub
 	hub := websocket.NewHub(natsClient)
 	go hub.Run()
