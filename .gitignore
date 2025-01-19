@@ -24,3 +24,17 @@ go.work.sum
 # env file
 .env
 *.json
+
+# Air configuration files
+.air.toml
+.air.yml
+.air.json
+
+# Air log files
+air.log
+
+# Temporary files
+tmp/
+
+# Log files
+*.log

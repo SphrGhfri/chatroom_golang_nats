@@ -2,9 +2,10 @@ services:
   nats:
     image: nats:2.10
     container_name: "nats"
-    ports:
-      - "4222:4222"
-      - "8222:8222"
+
+  redis:
+    image: redis:6-alpine
+    container_name: "redis"
 
   server:
     build:
@@ -13,6 +14,7 @@ services:
     container_name: "chat_server"
     depends_on:
       - nats
+      - redis
     ports:
       - "8080:8080"
     volumes:
