@@ -50,6 +50,22 @@ func (r *RedisClient) ClearActiveUsers() error {
 	return r.client.Del(r.ctx, "active_users").Err()
 }
 
+// Generic set methods
+func (r *RedisClient) SAdd(key, member string) error {
+	return r.client.SAdd(r.ctx, key, member).Err()
+}
+func (r *RedisClient) SRem(key, member string) error {
+	return r.client.SRem(r.ctx, key, member).Err()
+}
+func (r *RedisClient) SMembers(key string) ([]string, error) {
+	return r.client.SMembers(r.ctx, key).Result()
+}
+
+// Clear entire Redis
+func (r *RedisClient) FlushAll() error {
+	return r.client.FlushAll(r.ctx).Err()
+}
+
 // Close closes the Redis connection.
 func (r *RedisClient) Close() error {
 	return r.client.Close()

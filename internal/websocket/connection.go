@@ -1,12 +1,13 @@
 package websocket
 
 import (
-	"log"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
+	"github.com/SphrGhfri/chatroom_golang_nats/internal/port"
 	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
-	"github.com/SphrGhfri/chatroom_golang_nats/service"
 	gws "github.com/gorilla/websocket"
 )
 
@@ -15,15 +16,23 @@ type Connection struct {
 	Send        chan interface{}
 	Hub         *Hub
 	Username    string
-	ChatService service.ChatService
+	ChatService port.ChatService
 	Logger      logger.Logger
+
+	CurrentRoom string // "global" by default, or a custom room
 }
 
 func (c *Connection) ReadPump() {
 	defer func() {
+		if c.CurrentRoom != "" {
+			if err := c.ChatService.LeaveRoom(c.CurrentRoom, c.Username); err != nil {
+				c.Logger.Errorf("LeaveRoom error: %v", err)
+			}
+		}
+		if err := c.ChatService.RemoveActiveUser(c.Username); err != nil {
+			c.Logger.Errorf("RemoveActiveUser error: %v", err)
+		}
 		c.Hub.Unregister <- c
-		// Remove from presence if you handle that in the service:
-		_ = c.ChatService.RemoveActiveUser(c.Username)
 		c.Ws.Close()
 	}()
 
@@ -37,46 +46,137 @@ func (c *Connection) ReadPump() {
 		switch msg.Type {
 
 		case domain.MessageTypeList:
-			// Example: list of active users
-			users, err := c.ChatService.ListActiveUsers()
+			// /list or /list room
+			room := strings.TrimSpace(msg.Room)
+			if room == "" {
+				users, err := c.ChatService.ListActiveUsers()
+				if err != nil {
+					c.Logger.Errorf("List users error: %v", err)
+					continue
+				}
+				c.sendSystemMsg("All active users: "+join(users, ", "), now())
+			} else {
+				members, err := c.ChatService.ListRoomMembers(room)
+				if err != nil {
+					c.Logger.Errorf("ListRoomMembers error: %v", err)
+					continue
+				}
+				c.sendSystemMsg("Users in "+room+": "+join(members, ", "), now())
+			}
+
+		case domain.MessageTypeRooms:
+			rooms, err := c.ChatService.ListAllRooms()
 			if err != nil {
-				c.Logger.Errorf("[CONNECTION] List users error: %v", err)
+				c.Logger.Errorf("ListAllRooms error: %v", err)
 				continue
 			}
-			// Build a reply message for the requesting client
-			reply := domain.ChatMessage{
-				Type:    "list_users_response",
-				Sender:  "System",
-				Content: "Active users: " + strings.Join(users, ", "),
-				// Possibly use msg.Timestamp or set a new timestamp
+			c.sendSystemMsg("Available rooms: "+join(rooms, ", "), now())
+
+		case domain.MessageTypeJoin:
+			oldRoom := c.CurrentRoom
+			newRoom := strings.TrimSpace(msg.Room)
+			if newRoom == "" {
+				continue
 			}
-			// Send only to this connection
-			c.Send <- reply
+
+			if err := c.ChatService.SwitchRoom(oldRoom, newRoom, c.Username); err != nil {
+				c.Logger.Errorf("SwitchRoom error: %v", err)
+				continue
+			}
+			c.CurrentRoom = newRoom
+
+			joinMsg := domain.ChatMessage{
+				Type:      domain.MessageTypeChat,
+				Sender:    "System",
+				Content:   fmt.Sprintf("%s joined room %s", c.Username, newRoom),
+				Timestamp: now(),
+				Room:      newRoom,
+			}
+			if err := c.ChatService.PublishMessage(joinMsg); err != nil {
+				c.Logger.Errorf("PublishMessage error: %v", err)
+				continue
+			}
+
+		case domain.MessageTypeLeave:
+			oldRoom := c.CurrentRoom
+			if oldRoom == "" {
+				oldRoom = "global"
+			}
+			if err := c.ChatService.SwitchRoom(oldRoom, "global", c.Username); err != nil {
+				c.Logger.Errorf("SwitchRoom error: %v", err)
+				continue
+			}
+			c.CurrentRoom = "global"
+
+			leftMsg := domain.ChatMessage{
+				Type:      domain.MessageTypeChat,
+				Sender:    "System",
+				Content:   c.Username + " left room " + oldRoom,
+				Timestamp: now(),
+				Room:      oldRoom,
+			}
+			joinMsg := domain.ChatMessage{
+				Type:      domain.MessageTypeChat,
+				Sender:    "System",
+				Content:   c.Username + " joined room global",
+				Timestamp: now(),
+				Room:      "global",
+			}
+			if err := c.ChatService.PublishMessage(leftMsg); err != nil {
+				c.Logger.Errorf("PublishMessage error: %v", err)
+				continue
+			}
+			if err := c.ChatService.PublishMessage(joinMsg); err != nil {
+				c.Logger.Errorf("PublishMessage error: %v", err)
+				continue
+			}
 
 		case domain.MessageTypeChat:
-			// Normal chat message
-			// Typically you'd set the sender, but maybe you're relying on the client to send it
-			// If needed, set: msg.Sender = c.Username
+			if msg.Room == "" {
+				msg.Room = c.CurrentRoom
+				if msg.Room == "" {
+					msg.Room = "global"
+				}
+			}
+			msg.Sender = c.Username
+			msg.Timestamp = now()
+
+			// Publish message to the appropriate NATS room
 			if err := c.ChatService.PublishMessage(msg); err != nil {
-				c.Logger.Errorf("[CONNECTION] PublishMessage error: %v", err)
+				c.Logger.Errorf("PublishMessage error: %v", err)
 			}
 
 		default:
-			// Unknown or not handled
-			c.Logger.Infof("[CONNECTION] Unknown message type: %s", msg.Type)
+			c.Logger.Infof("[CONNECTION] Unknown type: %s", msg.Type)
 		}
 	}
 }
 
-// writePump listens on the send channel and sends messages to the WebSocket.
 func (c *Connection) WritePump() {
 	defer c.Ws.Close()
 
 	for msg := range c.Send {
-		err := c.Ws.WriteJSON(msg)
-		if err != nil {
-			log.Printf("[CONNECTION] WriteJSON error: %v", err)
+		if err := c.Ws.WriteJSON(msg); err != nil {
+			c.Logger.Errorf("[CONNECTION] WriteJSON error: %v", err)
 			break
 		}
 	}
+}
+
+// Helpers
+func (c *Connection) sendSystemMsg(content, timestamp string) {
+	reply := domain.ChatMessage{
+		Type:      domain.MessageTypeListResponse,
+		Sender:    "System",
+		Content:   content,
+		Timestamp: timestamp,
+	}
+	c.Send <- reply
+}
+
+func join(strs []string, sep string) string {
+	return strings.Join(strs, sep)
+}
+func now() string {
+	return time.Now().Format("2006-01-02 15:04:05")
 }

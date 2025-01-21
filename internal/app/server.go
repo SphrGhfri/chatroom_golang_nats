@@ -11,7 +11,6 @@ import (
 
 	"github.com/SphrGhfri/chatroom_golang_nats/api/ws"
 	"github.com/SphrGhfri/chatroom_golang_nats/config"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/nats"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/redis"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/websocket"
@@ -48,15 +47,15 @@ func NewApp(cfg config.Config) (*App, error) {
 	}
 
 	// 4) Clear old active users
-	if err := redisClient.ClearActiveUsers(); err != nil {
-		logg.Errorf("Failed to clear active users: %v", err)
+	if err := redisClient.FlushAll(); err != nil {
+		logg.Errorf("Failed to clear redis: %v", err)
 	}
 
-	// 5) Create ChatService (Business Logic)
-	chatService := service.NewChatService(natsClient, redisClient, logg)
-
-	// 6) Create the Hub (for WebSocket connections)
+	// 5) Create the Hub (for WebSocket connections)
 	hub := websocket.NewHub()
+
+	// 6) Create ChatService (Business Logic)
+	chatService := service.NewChatService(natsClient, redisClient, hub, logg)
 
 	// 7) Create the HTTP server (with routes)
 	httpServer := createHTTPServer(cfg, logg, hub, chatService)
@@ -82,7 +81,7 @@ func createHTTPServer(
 	hub *websocket.Hub,
 	chatSvc service.ChatService,
 ) *http.Server {
-	// Instead of building a mux here, call your new SetupWebSocketRoutes
+
 	wsMux := ws.SetupWebSocketRoutes(hub, chatSvc, logg)
 
 	srv := &http.Server{
@@ -92,22 +91,12 @@ func createHTTPServer(
 	return srv
 }
 
-// Start runs your application: starts the Hub, NATS subscriber, and the HTTP server.
+// Start runs application: starts the Hub, NATS subscriber, and the HTTP server.
 func (a *App) Start() error {
 	// 1) Start the Hub in a separate goroutine
 	go a.Hub.Run()
 
 	a.Logger.Infof("Hub started.")
-
-	// 2) Subscribe to NATS
-	err := a.NatsClient.Subscribe("chat.events", func(msg domain.ChatMessage) {
-		// When receiving a message from NATS, broadcast locally
-		a.Hub.Broadcast <- msg
-	})
-	if err != nil {
-		return fmt.Errorf("failed to subscribe to NATS: %w", err)
-	}
-	a.Logger.Infof("Subscribed to NATS subject 'chat.events'.")
 
 	// 3) Start HTTP server (async)
 	go func() {

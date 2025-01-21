@@ -72,10 +72,12 @@ func (h *Hub) broadcastMessage(msg domain.ChatMessage) {
 	defer h.mu.RUnlock()
 
 	for conn := range h.clients {
+		if msg.Room != "" && conn.CurrentRoom != msg.Room {
+			continue
+		}
 		select {
 		case conn.Send <- msg:
 		default:
-			// If blocked, remove
 			h.removeClient(conn)
 		}
 	}

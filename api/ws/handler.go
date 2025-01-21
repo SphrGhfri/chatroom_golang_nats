@@ -10,7 +10,6 @@ import (
 	gws "github.com/gorilla/websocket"
 )
 
-// For demonstration. If you already have your own Upgrader, reuse it.
 var upgrader = gws.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -37,10 +36,33 @@ func HandleWebSocket(
 			return
 		}
 
-		// Use ChatService instead of redisClient directly
+		// Check if username is already taken
+		existingUsers, err := chatService.ListActiveUsers()
+		if err != nil {
+			logg.Errorf("[WS HANDLER] Error listing active users: %v", err)
+			conn.Close()
+			return
+		}
+		for _, u := range existingUsers {
+			if u == username {
+				logg.Errorf("[WS HANDLER] Username '%s' already in use!", username)
+
+				_ = conn.WriteJSON(map[string]string{
+					"type":    "username_exists",
+					"content": "Username is already exists. Please reconnect with a new username.",
+				})
+
+				conn.Close()
+				return
+			}
+		}
+
 		if err := chatService.AddActiveUser(username); err != nil {
 			log.Printf("[WS HANDLER] Failed to add user '%s': %v", username, err)
 		}
+
+		// Place user in "global" by default
+		_ = chatService.JoinRoom("global", username)
 
 		client := &websocket.Connection{
 			Ws:          conn,
@@ -49,6 +71,7 @@ func HandleWebSocket(
 			Username:    username,
 			ChatService: chatService,
 			Logger:      logg,
+			CurrentRoom: "global",
 		}
 
 		hub.Register <- client

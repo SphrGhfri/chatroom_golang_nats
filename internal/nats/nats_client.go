@@ -2,12 +2,15 @@ package nats
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/nats-io/nats.go"
 )
 
 type NATSClient struct {
-	Conn *nats.Conn
+	Conn       *nats.Conn
+	SubMapping map[string]*nats.Subscription // Store subscriptions per username
+	mu         sync.Mutex
 }
 
 func NewNATSClient(url string) (*NATSClient, error) {
@@ -18,7 +21,8 @@ func NewNATSClient(url string) (*NATSClient, error) {
 	}
 
 	return &NATSClient{
-		Conn: nc,
+		Conn:       nc,
+		SubMapping: make(map[string]*nats.Subscription),
 	}, nil
 }
 

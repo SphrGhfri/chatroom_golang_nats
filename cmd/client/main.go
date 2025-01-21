@@ -15,52 +15,56 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var addr = flag.String("addr", "localhost:8080", "http service address")
-
-// Define your message types
+// Matching server domain
 const (
-	MessageTypeChat         = "chat_message"
-	MessageTypeList         = "list_users"
-	MessageTypeListResponse = "list_users_response" // if server responds with a list
+	MessageTypeChat          = "chat_message"
+	MessageTypeUsers         = "list_users"
+	MessageTypeUsersResponse = "list_users_response"
+	MessageTypeRooms         = "list_rooms"
+	MessageTypeRoomsResponse = "list_rooms_response"
+	MessageTypeJoin          = "join_room"
+	MessageTypeLeave         = "leave_room"
+
+	MessageTypeUserExists = "username_exists"
 )
 
-// ChatMessage is the typed message structure exchanged with the server
 type ChatMessage struct {
-	Type      string `json:"type"`              // e.g. "chat_message", "list_users", etc.
-	Sender    string `json:"sender,omitempty"`  // only relevant for chat
-	Content   string `json:"content,omitempty"` // message text or list of users
+	Type      string `json:"type"`
+	Sender    string `json:"sender,omitempty"`
+	Content   string `json:"content,omitempty"`
 	Timestamp string `json:"timestamp,omitempty"`
+	Room      string `json:"room,omitempty"`
 }
+
+var addr = flag.String("addr", "localhost:8080", "http service address")
 
 func main() {
 	flag.Parse()
 
-	username := getUsername()
-
+	username := promptUsername()
 	conn := connectWebSocket(username)
 	defer conn.Close()
 
-	// Listen for OS interrupt signals (Ctrl+C)
+	// OS interrupt
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	// Goroutine to listen for incoming WS messages
 	done := make(chan struct{})
 	go readMessages(conn, done)
 
-	fmt.Println("Type '/list' to see active users, or type any message to chat:")
-	writeMessages(conn, username, interrupt, done)
+	printHelp()
+
+	currentRoom := "global"
+	writeMessages(conn, username, &currentRoom, interrupt, done)
 }
 
-// getUsername simply asks user input for their name
-func getUsername() string {
+func promptUsername() string {
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("Enter your username: ")
 	scanner.Scan()
 	return scanner.Text()
 }
 
-// connectWebSocket dials the WS endpoint with the given username
 func connectWebSocket(username string) *websocket.Conn {
 	u := url.URL{
 		Scheme:   "ws",
@@ -72,98 +76,128 @@ func connectWebSocket(username string) *websocket.Conn {
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		log.Fatalf("Failed to connect to WebSocket server: %v", err)
+		log.Fatalf("Failed to connect: %v", err)
 	}
-	log.Println("Connected to WebSocket server.")
+	log.Println("Connected.")
 	return conn
 }
 
-// readMessages continuously reads messages from the server,
-// unmarshals them into ChatMessage, and prints them appropriately.
 func readMessages(conn *websocket.Conn, done chan struct{}) {
 	defer close(done)
-
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading message: %v", err)
+			log.Printf("Read error: %v", err)
 			return
 		}
-
 		var msg ChatMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
-			log.Printf("Error parsing message: %v", err)
+			log.Printf("JSON parse error: %v", err)
 			continue
 		}
 
 		switch msg.Type {
 		case MessageTypeChat:
-			// Regular chat message from the server or other users
-			fmt.Printf("\n[%s] %s: %s\n", msg.Timestamp, msg.Sender, msg.Content)
+			fmt.Printf("\n[%s][%s] %s\n", msg.Timestamp, msg.Sender, msg.Content)
 
-		case MessageTypeListResponse:
-			// e.g. a list of active users
+		case MessageTypeUsersResponse:
+			fmt.Printf("\n[System] %s\n", msg.Content)
+
+		case MessageTypeRoomsResponse:
+			fmt.Printf("\n[System] %s\n", msg.Content)
+
+		case MessageTypeUserExists:
 			fmt.Printf("\n[System] %s\n", msg.Content)
 
 		default:
-			// Unrecognized type—just print raw content
-			fmt.Printf("\n[Unknown Type: %s] %s\n", msg.Type, msg.Content)
+			fmt.Printf("\n[Unknown] Type=%s Content=%s\n", msg.Type, msg.Content)
 		}
 	}
 }
 
-// writeMessages reads user input from stdin. If the user types a recognized
-// command (like "/list"), we send a typed message. Otherwise, we send a normal chat message.
-func writeMessages(conn *websocket.Conn, username string, interrupt chan os.Signal, done chan struct{}) {
+func writeMessages(conn *websocket.Conn, username string, currentRoom *string, interrupt chan os.Signal, done chan struct{}) {
 	scanner := bufio.NewScanner(os.Stdin)
-
 	for {
 		select {
 		case <-done:
 			return
 		case <-interrupt:
 			log.Println("Interrupt received, closing connection...")
-			err := conn.WriteMessage(websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			if err != nil {
-				log.Printf("Error during close: %v", err)
-			}
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			return
 		default:
 			if scanner.Scan() {
 				input := scanner.Text()
-
-				// Skip empty lines
 				if strings.TrimSpace(input) == "" {
 					continue
 				}
 
 				var msg ChatMessage
+				fields := strings.Fields(input)
 
-				// Check if user typed a command
-				if strings.HasPrefix(input, "/list") {
-					// Command to list active users
-					msg.Type = MessageTypeList
-				} else {
-					// Otherwise, treat it as a normal chat message
+				switch {
+				case strings.HasPrefix(input, "/users"):
+					msg.Type = MessageTypeUsers
+					if len(fields) == 2 {
+						msg.Room = fields[1]
+					}
+
+				case strings.HasPrefix(input, "/rooms"):
+					msg.Type = MessageTypeRooms
+
+				case strings.HasPrefix(input, "/join"):
+					if len(fields) < 2 {
+						fmt.Println("Usage: /join <roomName>")
+						continue
+					}
+					msg.Type = MessageTypeJoin
+					msg.Room = fields[1]
+					*currentRoom = fields[1]
+
+				case strings.HasPrefix(input, "/leave"):
+					msg.Type = MessageTypeLeave
+					msg.Room = *currentRoom
+					*currentRoom = "global"
+
+				case strings.HasPrefix(input, "/help"):
+					printHelp()
+
+				default:
+					// Normal chat
 					msg.Type = MessageTypeChat
 					msg.Sender = username
 					msg.Content = input
 					msg.Timestamp = time.Now().Format("2006-01-02 15:04:05")
+					msg.Room = *currentRoom
 				}
 
 				if err := conn.WriteJSON(msg); err != nil {
-					log.Printf("Error sending message: %v", err)
+					log.Printf("WriteJSON error: %v", err)
 					return
 				}
 
-				// If it's a chat message, optionally echo what was sent
+				// optional local echo
 				if msg.Type == MessageTypeChat {
-					fmt.Printf("[Sent] %s\n", input)
+					if msg.Room == "global" {
+						fmt.Printf("[Sent to GLOBAL] %s\n", input)
+					} else {
+						fmt.Printf("[Sent to %s] %s\n", msg.Room, input)
+					}
 				} else {
 					fmt.Printf("[Sent Command] %s\n", input)
 				}
 			}
 		}
 	}
+}
+
+func printHelp() {
+	fmt.Println(`Commands:
+    /help
+    /users           -> list all active users
+    /users <room>    -> list all users in <room>
+    /rooms           -> list all active rooms
+    /join <room>     -> switch from your current room to <room>
+    /leave           -> go back to "global" room
+    Any other text   -> send a normal chat to your current room (default is "global").`)
 }
