@@ -4,8 +4,10 @@ services:
     container_name: "nats"
 
   redis:
-    image: redis:6-alpine
+    image: redis:7.2
     container_name: "redis"
+    volumes:
+      - redis-volume:/data
 
   server:
     build:
@@ -19,3 +21,6 @@ services:
       - "8080:8080"
     volumes:
       - "./config.json:/app/config.json"
+      
+volumes:
+  redis-volume:

@@ -4,27 +4,22 @@ import (
 	"sync"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/nats"
 )
 
-// Hub manages all WebSocket connections and broadcasts messages.
 type Hub struct {
-	mu         sync.RWMutex            // Mutex for safe access to the clients map
-	clients    map[*Connection]bool    // Active WebSocket connections
-	broadcast  chan domain.ChatMessage // Channel for broadcasting messages
-	register   chan *Connection        // Channel for new connections
-	unregister chan *Connection        // Channel for disconnecting clients
-	natsClient *nats.NATSClient        // NATS client for message publishing
+	mu         sync.RWMutex
+	clients    map[*Connection]bool
+	Register   chan *Connection
+	Unregister chan *Connection
+	Broadcast  chan domain.ChatMessage
 }
 
-// NewHub creates a new Hub instance.
-func NewHub(natsClient *nats.NATSClient) *Hub {
+func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*Connection]bool),
-		broadcast:  make(chan domain.ChatMessage),
-		register:   make(chan *Connection),
-		unregister: make(chan *Connection),
-		natsClient: natsClient,
+		Broadcast:  make(chan domain.ChatMessage),
+		Register:   make(chan *Connection),
+		Unregister: make(chan *Connection),
 	}
 }
 
@@ -32,11 +27,11 @@ func NewHub(natsClient *nats.NATSClient) *Hub {
 func (h *Hub) Run() {
 	for {
 		select {
-		case conn := <-h.register:
+		case conn := <-h.Register:
 			h.addClient(conn)
-		case conn := <-h.unregister:
+		case conn := <-h.Unregister:
 			h.removeClient(conn)
-		case msg := <-h.broadcast:
+		case msg := <-h.Broadcast:
 			h.broadcastMessage(msg)
 		}
 	}
@@ -48,13 +43,10 @@ func (h *Hub) Close() {
 	defer h.mu.Unlock()
 
 	for conn := range h.clients {
-		close(conn.send)
-		conn.ws.Close()
+		close(conn.Send)
+		conn.Ws.Close()
 		delete(h.clients, conn)
 	}
-	close(h.broadcast)
-	close(h.register)
-	close(h.unregister)
 }
 
 // addClient adds a new connection to the Hub.
@@ -70,7 +62,7 @@ func (h *Hub) removeClient(conn *Connection) {
 	defer h.mu.Unlock()
 	if _, exists := h.clients[conn]; exists {
 		delete(h.clients, conn)
-		close(conn.send)
+		close(conn.Send)
 	}
 }
 
@@ -79,16 +71,12 @@ func (h *Hub) broadcastMessage(msg domain.ChatMessage) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	for client := range h.clients {
+	for conn := range h.clients {
 		select {
-		case client.send <- msg:
+		case conn.Send <- msg:
 		default:
-			h.removeClient(client)
+			// If blocked, remove
+			h.removeClient(conn)
 		}
 	}
-}
-
-// Broadcast queues a message for broadcasting.
-func (h *Hub) Broadcast(msg domain.ChatMessage) {
-	h.broadcast <- msg
 }

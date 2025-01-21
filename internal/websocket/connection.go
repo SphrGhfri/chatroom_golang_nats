@@ -2,117 +2,80 @@ package websocket
 
 import (
 	"log"
-	"net/http"
 	"strings"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/redis"
-	"github.com/gorilla/websocket"
+	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
+	"github.com/SphrGhfri/chatroom_golang_nats/service"
+	gws "github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for testing; restrict in production.
-	},
-}
-
-// Connection represents a single WebSocket connection to a client.
 type Connection struct {
-	ws          *websocket.Conn         // WebSocket connection
-	send        chan domain.ChatMessage // Channel for sending messages to the client
-	hub         *Hub                    // Reference to the Hub managing this connection
-	redisClient *redis.RedisClient
-	username    string
+	Ws          *gws.Conn
+	Send        chan interface{}
+	Hub         *Hub
+	Username    string
+	ChatService service.ChatService
+	Logger      logger.Logger
 }
 
-// ServeWS upgrades an HTTP connection to a WebSocket connection and registers it with the Hub.
-func ServeWS(hub *Hub, redisClient *redis.RedisClient, w http.ResponseWriter, r *http.Request) {
-	// Upgrade HTTP to WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[CONNECTION] Failed to upgrade WebSocket: %v", err)
-		http.Error(w, "Failed to upgrade WebSocket", http.StatusInternalServerError)
-		return
-	}
-
-	// Retrieve username from query parameter
-	username := r.URL.Query().Get("username")
-	if username == "" {
-		log.Printf("Username is required")
-		conn.Close()
-		return
-	}
-
-	client := &Connection{
-		ws:          conn,
-		send:        make(chan domain.ChatMessage, 256), // Buffered channel for outgoing messages
-		hub:         hub,
-		redisClient: redisClient,
-		username:    username,
-	}
-
-	// Add user to active users list
-	err = redisClient.AddActiveUser(username)
-	if err != nil {
-		log.Printf("Failed to add user to Redis: %v", err)
-	}
-	// Register the client with the Hub
-	hub.register <- client
-	log.Printf("[CONNECTION] New WebSocket connection: %s Username: %s", conn.RemoteAddr(), username)
-
-	go client.readPump()
-	go client.writePump()
-}
-
-func (c *Connection) readPump() {
+func (c *Connection) ReadPump() {
 	defer func() {
-		c.hub.unregister <- c
-		c.ws.Close()
-		c.redisClient.RemoveActiveUser(c.username)
+		c.Hub.Unregister <- c
+		// Remove from presence if you handle that in the service:
+		_ = c.ChatService.RemoveActiveUser(c.Username)
+		c.Ws.Close()
 	}()
 
 	for {
 		var msg domain.ChatMessage
-		err := c.ws.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("[CONNECTION] Error reading message: %v", err)
+		if err := c.Ws.ReadJSON(&msg); err != nil {
+			c.Logger.Errorf("[CONNECTION] ReadJSON error: %v", err)
 			break
 		}
 
-		// Handle the #users command
-		if msg.Content == "#users" {
-			users, err := c.redisClient.GetActiveUsers()
+		switch msg.Type {
+
+		case domain.MessageTypeList:
+			// Example: list of active users
+			users, err := c.ChatService.ListActiveUsers()
 			if err != nil {
-				log.Printf("[CONNECTION] Failed to get active users from Redis: %v", err)
+				c.Logger.Errorf("[CONNECTION] List users error: %v", err)
 				continue
 			}
+			// Build a reply message for the requesting client
+			reply := domain.ChatMessage{
+				Type:    "list_users_response",
+				Sender:  "System",
+				Content: "Active users: " + strings.Join(users, ", "),
+				// Possibly use msg.Timestamp or set a new timestamp
+			}
+			// Send only to this connection
+			c.Send <- reply
 
-			response := domain.ChatMessage{
-				Sender:    "System",
-				Content:   "Active users: " + strings.Join(users, ", "),
-				Timestamp: msg.Timestamp,
+		case domain.MessageTypeChat:
+			// Normal chat message
+			// Typically you'd set the sender, but maybe you're relying on the client to send it
+			// If needed, set: msg.Sender = c.Username
+			if err := c.ChatService.PublishMessage(msg); err != nil {
+				c.Logger.Errorf("[CONNECTION] PublishMessage error: %v", err)
 			}
 
-			c.send <- response
-			continue
-		}
-
-		// Publish the message to NATS
-		err = c.hub.natsClient.Publish("chat.events", msg)
-		if err != nil {
-			log.Printf("[CONNECTION] Failed to publish message to NATS: %v", err)
+		default:
+			// Unknown or not handled
+			c.Logger.Infof("[CONNECTION] Unknown message type: %s", msg.Type)
 		}
 	}
 }
 
 // writePump listens on the send channel and sends messages to the WebSocket.
-func (c *Connection) writePump() {
-	defer c.ws.Close()
+func (c *Connection) WritePump() {
+	defer c.Ws.Close()
 
-	for msg := range c.send {
-		err := c.ws.WriteJSON(msg)
+	for msg := range c.Send {
+		err := c.Ws.WriteJSON(msg)
 		if err != nil {
-			log.Printf("[CONNECTION] Error sending message: %v", err)
+			log.Printf("[CONNECTION] WriteJSON error: %v", err)
 			break
 		}
 	}

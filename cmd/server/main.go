@@ -4,36 +4,27 @@ import (
 	"flag"
 	"os"
 
+	"github.com/SphrGhfri/chatroom_golang_nats/config"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/app"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/config"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/nats"
-	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
 )
 
 var configPath = flag.String("config", "config.json", "service configuration file")
 
 func main() {
 	flag.Parse()
-
-	// Load configuration
-	if v := os.Getenv("CONFIG_PATH"); len(v) > 0 {
-		*configPath = v
+	if envPath := os.Getenv("CONFIG_PATH"); envPath != "" {
+		*configPath = envPath
 	}
 
 	cfg := config.MustReadConfig(*configPath)
 
-	// Initialize logger
-	logg := logger.NewLogger(cfg.LogLevel)
-
-	// Initialize NATS client
-	natsClient, err := nats.NewNATSClient(cfg.NATSURL)
+	application, err := app.NewApp(cfg)
 	if err != nil {
-		logg.Fatalf("Failed to connect to NATS: %v", err)
+		panic(err)
 	}
-	defer natsClient.Close()
 
-	// Start the server
-	if err := app.RunServer(cfg, logg, natsClient); err != nil {
-		logg.Fatalf("Server error: %v", err)
+	// Block until Stop is called or an error occurs
+	if err := application.Start(); err != nil {
+		panic(err)
 	}
 }
