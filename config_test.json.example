@@ -1,0 +1,6 @@
+{
+  "port": 8082,
+  "nats_url": "nats://localhost:4222",
+  "log_level": "debug",
+  "redis_url": "redis://localhost:7379"
+}
