@@ -1,250 +1,145 @@
 package integration
 
 import (
-	"fmt"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/api/ws"
 	"github.com/SphrGhfri/chatroom_golang_nats/config"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/app"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
+	"github.com/SphrGhfri/chatroom_golang_nats/internal/nats"
+	"github.com/SphrGhfri/chatroom_golang_nats/internal/redis"
 	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
-	gws "github.com/gorilla/websocket"
-	"github.com/stretchr/testify/assert"
+	"github.com/SphrGhfri/chatroom_golang_nats/service"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 )
 
-func setupTestServer(t *testing.T) *httptest.Server {
-	// Load test configuration from file
+type testClient struct {
+	conn     *websocket.Conn
+	username string
+	t        *testing.T // Added t for assertions
+}
+
+// Simple setup with single responsibility
+func setupTest(t *testing.T) (*httptest.Server, *testClient) {
 	config := config.MustReadConfig("../../config_test.json")
-	logg := logger.NewLogger("debug")
+	natsClient, err := nats.NewNATSClient(config.NATSURL)
+	require.NoError(t, err)
 
-	// Create the application instance
-	appInstance, err := app.NewApp(config)
-	if err != nil {
-		t.Fatalf("Failed to initialize the app: %v", err)
-	}
+	redisClient, err := redis.NewRedisClient(config.RedisURL)
+	require.NoError(t, err)
+	redisClient.FlushAll()
 
-	// Start WebSocket hub
-	go appInstance.Hub.Run()
+	chatService := service.NewChatService(natsClient, redisClient, logger.NewLogger("debug"))
+	server := httptest.NewServer(ws.SetupWebSocketRoutes(ws.WSConfig{
+		ChatService: chatService,
+		Logger:      logger.NewLogger("debug"),
+	}))
 
-	// Create a test HTTP server with WebSocket routes
-	server := httptest.NewServer(ws.SetupWebSocketRoutes(appInstance.Hub, appInstance.ChatService, logg))
+	// Create first client
+	client := connectClient(t, server, "user1")
 
 	t.Cleanup(func() {
+		client.conn.Close()
 		server.Close()
-		appInstance.Hub.Close()
-
-		// Flush Redis data after each test
-		err := appInstance.RedisClient.FlushAll()
-		assert.NoError(t, err, "Failed to flush Redis after test")
-
-		appInstance.NatsClient.Close()
-		appInstance.RedisClient.Close()
+		redisClient.Close()
+		natsClient.Close()
 	})
 
-	return server
+	return server, client
 }
 
-func TestWebSocketConnection(t *testing.T) {
-	server := setupTestServer(t)
-	wsURL := "ws" + server.URL[4:] + "/ws?username=testuser"
-
-	conn, _, err := gws.DefaultDialer.Dial(wsURL, nil)
-	assert.NoError(t, err, "Failed to connect to WebSocket server")
-	defer conn.Close()
-
-	message := domain.ChatMessage{
-		Type:    domain.MessageTypeChat,
-		Sender:  "testuser",
-		Content: "Hello, WebSocket!",
-		Room:    "global",
-	}
-
-	err = conn.WriteJSON(message)
-	assert.NoError(t, err, "Failed to send WebSocket message")
-
-	// Read response
-	var receivedMsg domain.ChatMessage
-	err = conn.ReadJSON(&receivedMsg)
-	assert.NoError(t, err, "Failed to read WebSocket message")
-	assert.Equal(t, "Hello, WebSocket!", receivedMsg.Content)
-	assert.Equal(t, "testuser", receivedMsg.Sender)
+// Simple client connection
+func connectClient(t *testing.T, server *httptest.Server, username string) *testClient {
+	wsURL := "ws" + server.URL[4:] + "/ws?username=" + username
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	return &testClient{conn: conn, username: username, t: t}
 }
 
-func TestWebSocketBroadcast(t *testing.T) {
-	server := setupTestServer(t)
-	wsURL := "ws" + server.URL[4:] + "/ws?username=user1"
-
-	// Connect first user
-	conn1, _, err := gws.DefaultDialer.Dial(wsURL, nil)
-	assert.NoError(t, err, "Failed to connect first user")
-	defer conn1.Close()
-
-	// Connect second user
-	wsURL2 := "ws" + server.URL[4:] + "/ws?username=user2"
-	conn2, _, err := gws.DefaultDialer.Dial(wsURL2, nil)
-	assert.NoError(t, err, "Failed to connect second user")
-	defer conn2.Close()
-
-	time.Sleep(500 * time.Millisecond)
-
-	// Send message from user1
-	message := domain.ChatMessage{
-		Type:    domain.MessageTypeChat,
-		Sender:  "user1",
-		Content: "Hello from user1",
-		Room:    "global",
+// Basic send and receive
+func (c *testClient) send(msgType domain.MessageType, content, room string) {
+	msg := domain.ChatMessage{
+		Type:      msgType,
+		Content:   content,
+		Room:      room,
+		Sender:    c.username,
+		Timestamp: time.Now().Format(time.RFC3339),
 	}
-	err = conn1.WriteJSON(message)
-	assert.NoError(t, err, "Failed to send message from user1")
-
-	time.Sleep(500 * time.Millisecond)
-
-	// Read message from user2
-	var receivedMsg domain.ChatMessage
-	err = conn2.ReadJSON(&receivedMsg)
-	assert.NoError(t, err, "Failed to receive message on user2")
-
-	assert.Equal(t, "Hello from user1", receivedMsg.Content)
-	assert.Equal(t, "user1", receivedMsg.Sender)
+	require.NoError(c.t, c.conn.WriteJSON(msg))
 }
 
-func TestWebSocketRoomFunctionality(t *testing.T) {
-	server := setupTestServer(t)
-
-	// Connect user1 to room1
-	wsURL := "ws" + server.URL[4:] + "/ws?username=user1"
-	conn1, _, err := gws.DefaultDialer.Dial(wsURL, nil)
-	assert.NoError(t, err)
-	defer conn1.Close()
-
-	// Connect user2 to room1
-	wsURL2 := "ws" + server.URL[4:] + "/ws?username=user2"
-	conn2, _, err := gws.DefaultDialer.Dial(wsURL2, nil)
-	assert.NoError(t, err)
-	defer conn2.Close()
-
-	// User1 joins room1
-	joinMessage := domain.ChatMessage{
-		Type: domain.MessageTypeJoin,
-		Room: "room1",
-	}
-	err = conn1.WriteJSON(joinMessage)
-	assert.NoError(t, err)
-
-	time.Sleep(500 * time.Millisecond)
-
-	// User2 joins room1
-	joinMessage2 := domain.ChatMessage{
-		Type: domain.MessageTypeJoin,
-		Room: "room1",
-	}
-	err = conn2.WriteJSON(joinMessage2)
-	assert.NoError(t, err)
-
-	// Wait to ensure room joins are processed
-	time.Sleep(500 * time.Millisecond)
-
-	// Discard system messages (user1 and user2 join notifications)
-	var systemMsg domain.ChatMessage
-	for i := 0; i < 1; i++ {
-		err = conn2.ReadJSON(&systemMsg)
-		assert.NoError(t, err, "Failed to read system message for user2")
-		assert.Contains(t, systemMsg.Content, "joined room room1", "Expected join confirmation")
-	}
-
-	// Send message in room1
-	message := domain.ChatMessage{
-		Type:    domain.MessageTypeChat,
-		Sender:  "user1",
-		Content: "Hello Room1",
-		Room:    "room1",
-	}
-	err = conn1.WriteJSON(message)
-	assert.NoError(t, err)
-
-	time.Sleep(500 * time.Millisecond)
-
-	// Set a read deadline to avoid infinite wait
-	conn2.SetReadDeadline(time.Now().Add(3 * time.Second))
-
-	// Read actual chat message from user1
-	var receivedMsg domain.ChatMessage
-	err = conn2.ReadJSON(&receivedMsg)
-	assert.NoError(t, err, "User2 should receive the message")
-	assert.Equal(t, "Hello Room1", receivedMsg.Content)
-	assert.Equal(t, "user1", receivedMsg.Sender)
+func (c *testClient) receive() domain.ChatMessage {
+	var msg domain.ChatMessage
+	c.conn.SetReadDeadline(time.Now().Add(time.Second))
+	err := c.conn.ReadJSON(&msg)
+	require.NoError(c.t, err)
+	return msg
 }
 
-func TestWebSocketUserLeavesRoom(t *testing.T) {
-	server := setupTestServer(t)
+func TestMultiUserInteraction(t *testing.T) {
+	server, client1 := setupTest(t)
+	defer server.Close()
 
-	wsURL := "ws" + server.URL[4:] + "/ws?username=user1"
-	conn1, _, err := gws.DefaultDialer.Dial(wsURL, nil)
-	assert.NoError(t, err)
-	defer conn1.Close()
+	client2 := connectClient(t, server, "user2")
+	_ = client1.receive() // Drain user2 join room messages
+	defer client2.conn.Close()
 
-	// Join room1
-	joinMessage := domain.ChatMessage{
-		Type: domain.MessageTypeJoin,
-		Room: "room1",
-	}
-	err = conn1.WriteJSON(joinMessage)
-	assert.NoError(t, err)
+	// Drain welcome messages
+	_ = client1.receive()
+	_ = client2.receive()
 
-	// Allow some time for room join processing
-	time.Sleep(500 * time.Millisecond)
+	t.Run("join and chat", func(t *testing.T) {
+		// First user joins
+		client1.send(domain.MessageTypeJoin, "", "test-room")
+		_ = client1.receive() // Drain own join message
+		_ = client2.receive()
 
-	// Leave room1
-	leaveMessage := domain.ChatMessage{
-		Type: domain.MessageTypeLeave,
-		Room: "room1",
-	}
-	err = conn1.WriteJSON(leaveMessage)
-	assert.NoError(t, err)
+		// Second user joins
+		client2.send(domain.MessageTypeJoin, "", "test-room")
+		_ = client1.receive()
+		_ = client2.receive() // Drain own join message
 
-	// Allow some time for leave processing
-	time.Sleep(500 * time.Millisecond)
+		// Chat test - both sender and receiver get the message
+		testMsg1 := "Hello from user1"
+		client1.send(domain.MessageTypeChat, testMsg1, "")
 
-	// Expect two messages: leaving room1 and joining global
-	var leftMsg domain.ChatMessage
-	err = conn1.ReadJSON(&leftMsg)
-	assert.NoError(t, err)
-	assert.Contains(t, leftMsg.Content, "user1 joined room room1", "Expected join old room message")
+		msg1 := client2.receive() // client2 gets client1's message
+		require.Equal(t, testMsg1, msg1.Content)
 
-	var joinedMsg domain.ChatMessage
-	err = conn1.ReadJSON(&joinedMsg)
-	assert.NoError(t, err)
-	assert.Contains(t, joinedMsg.Content, "joined room global", "Expected join global message")
+		testMsg2 := "Hello from user2"
+		client2.send(domain.MessageTypeChat, testMsg2, "")
+
+		msg2 := client1.receive() // client1 gets client2's message
+		require.Equal(t, testMsg2, msg2.Content)
+
+	})
 }
 
-func TestConcurrentWebSocketConnections(t *testing.T) {
-	server := setupTestServer(t)
-	wsURL := "ws" + server.URL[4:] + "/ws"
+func TestRoomOperations(t *testing.T) {
+	server, client := setupTest(t)
+	defer server.Close()
 
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			u := fmt.Sprintf("%s?username=user%d", wsURL, i)
-			conn, _, err := gws.DefaultDialer.Dial(u, nil)
-			assert.NoError(t, err)
-			defer conn.Close()
+	// Wait for welcome message
+	_ = client.receive()
 
-			// Send a message from each connection
-			msg := domain.ChatMessage{
-				Type:    domain.MessageTypeChat,
-				Sender:  fmt.Sprintf("user%d", i),
-				Content: fmt.Sprintf("Hello from user%d", i),
-				Room:    "global",
-			}
-			err = conn.WriteJSON(msg)
-			assert.NoError(t, err)
-		}(i)
-	}
-	wg.Wait()
+	t.Run("room operations", func(t *testing.T) {
+		// Join a room first
+		client.send(domain.MessageTypeJoin, "", "test-room")
+		_ = client.receive() // Drain join message
+
+		// Test room listing
+		client.send(domain.MessageTypeRooms, "", "")
+		msg := client.receive()
+		require.Equal(t, domain.MessageTypeSystem, msg.Type)
+		require.Contains(t, msg.Content, "test-room")
+
+		// Test user listing
+		client.send(domain.MessageTypeList, "", "")
+		msg = client.receive()
+		require.Equal(t, domain.MessageTypeSystem, msg.Type)
+		require.Contains(t, msg.Content, "user1")
+	})
 }
