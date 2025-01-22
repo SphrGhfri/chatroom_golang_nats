@@ -9,13 +9,12 @@ import (
 
 type NATSClient struct {
 	Conn       *nats.Conn
-	SubMapping map[string]*nats.Subscription // Store subscriptions per username
-	mu         sync.Mutex
+	SubMapping map[string]*nats.Subscription // key: "room:username"
+	mu         sync.RWMutex
 }
 
 func NewNATSClient(url string) (*NATSClient, error) {
-	// Connect to NATS
-	nc, err := nats.Connect(url)
+	nc, err := nats.Connect(url, nats.MaxReconnects(-1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -27,5 +26,11 @@ func NewNATSClient(url string) (*NATSClient, error) {
 }
 
 func (c *NATSClient) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, sub := range c.SubMapping {
+		sub.Unsubscribe()
+	}
 	c.Conn.Close()
 }

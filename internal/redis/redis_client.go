@@ -50,6 +50,11 @@ func (r *RedisClient) ClearActiveUsers() error {
 	return r.client.Del(r.ctx, "active_users").Err()
 }
 
+// Check if user exists in active users set
+func (r *RedisClient) IsUserActive(username string) (bool, error) {
+	return r.client.SIsMember(r.ctx, "active_users", username).Result()
+}
+
 // Generic set methods
 func (r *RedisClient) SAdd(key, member string) error {
 	return r.client.SAdd(r.ctx, key, member).Err()

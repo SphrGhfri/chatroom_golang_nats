@@ -3,19 +3,17 @@ package ws
 import (
 	"net/http"
 
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/websocket"
 	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
 	"github.com/SphrGhfri/chatroom_golang_nats/service"
 )
 
-func SetupWebSocketRoutes(
-	hub *websocket.Hub,
-	chatService service.ChatService,
-	logg logger.Logger,
-) http.Handler {
+type WSConfig struct {
+	ChatService service.ChatService
+	Logger      logger.Logger
+}
+
+func SetupWebSocketRoutes(cfg WSConfig) http.Handler {
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("/ws", HandleWebSocket(hub, chatService, logg))
-
+	mux.HandleFunc("/ws", HandleWebSocket(cfg.ChatService, cfg.Logger))
 	return mux
 }

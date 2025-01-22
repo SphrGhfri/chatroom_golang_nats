@@ -13,40 +13,53 @@ func (c *NATSClient) SubscribeRoom(roomName, username string, handleFunc func(do
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	subject := fmt.Sprintf("chat.events.%s", roomName)
+	subject := fmt.Sprintf("chat.room.%s", roomName)
+	subKey := fmt.Sprintf("%s:%s", roomName, username)
 
-	// If the room is already subscribed, do nothing.
-	if _, exists := c.SubMapping[roomName]; exists {
+	// If this specific user is already subscribed to this room, do nothing
+	if _, exists := c.SubMapping[subKey]; exists {
 		return nil
 	}
 
 	sub, err := c.Conn.Subscribe(subject, func(msg *nats.Msg) {
 		var chatMsg domain.ChatMessage
 		if err := json.Unmarshal(msg.Data, &chatMsg); err != nil {
-			fmt.Printf("Failed to deserialize message: %v\n", err)
 			return
 		}
-		// Ensure the room is set (you could also use chatMsg.Room if it’s already set)
-		chatMsg.Room = roomName
-		handleFunc(chatMsg)
+		// Filter out messages from the same user at NATS level
+		if chatMsg.Sender != username {
+			handleFunc(chatMsg)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to room %s: %w", roomName, err)
 	}
 
-	c.SubMapping[roomName] = sub
+	c.SubMapping[subKey] = sub
 	return nil
 }
 
-func (c *NATSClient) UnsubscribeRoom(roomName string) error {
+func (c *NATSClient) UnsubscribeRoom(roomName, username string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if sub, exists := c.SubMapping[roomName]; exists {
+	subKey := fmt.Sprintf("%s:%s", roomName, username)
+	if sub, exists := c.SubMapping[subKey]; exists {
 		if err := sub.Unsubscribe(); err != nil {
-			return fmt.Errorf("failed to unsubscribe room %s: %w", roomName, err)
+			return fmt.Errorf("failed to unsubscribe: %w", err)
 		}
-		delete(c.SubMapping, roomName)
+		delete(c.SubMapping, subKey)
 	}
 	return nil
+}
+
+// CleanupSubscriptions unsubscribes from all rooms
+func (c *NATSClient) CleanupSubscriptions() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for room, sub := range c.SubMapping {
+		_ = sub.Unsubscribe()
+		delete(c.SubMapping, room)
+	}
 }

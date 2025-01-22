@@ -3,11 +3,11 @@ package service
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/nats"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/redis"
-	"github.com/SphrGhfri/chatroom_golang_nats/internal/websocket"
 	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
 )
 
@@ -18,25 +18,24 @@ type ChatService interface {
 	RemoveActiveUser(username string) error
 	ListActiveUsers() ([]string, error)
 
-	JoinRoom(roomName, username string) error
+	JoinRoom(roomName, username string, msgHandler func(domain.ChatMessage)) error
 	LeaveRoom(roomName, username string) error
 	ListRoomMembers(roomName string) ([]string, error)
 	ListAllRooms() ([]string, error)
-	SwitchRoom(oldRoom, newRoom, username string) error
+	SwitchRoom(oldRoom, newRoom, username string, msgHandler func(domain.ChatMessage)) error
+	IsUserActive(username string) (bool, error)
 }
 
 type chatService struct {
 	natsClient  *nats.NATSClient
 	redisClient *redis.RedisClient
-	hub         *websocket.Hub
 	logger      logger.Logger
 }
 
-func NewChatService(nc *nats.NATSClient, rc *redis.RedisClient, hub *websocket.Hub, logg logger.Logger) ChatService {
+func NewChatService(nc *nats.NATSClient, rc *redis.RedisClient, logg logger.Logger) ChatService {
 	return &chatService{
 		natsClient:  nc,
 		redisClient: rc,
-		hub:         hub,
 		logger:      logg,
 	}
 }
@@ -62,33 +61,49 @@ func (c *chatService) RemoveActiveUser(username string) error {
 func (c *chatService) ListActiveUsers() ([]string, error) {
 	return c.redisClient.GetActiveUsers()
 }
+func (c *chatService) IsUserActive(username string) (bool, error) {
+	exists, err := c.redisClient.IsUserActive(username)
+	if err != nil {
+		c.logger.Errorf("Failed to check user existence: %v", err)
+		return false, err
+	}
+	return exists, nil
+}
 
 // Rooms
-func (c *chatService) JoinRoom(roomName, username string) error {
+func (c *chatService) JoinRoom(roomName, username string, msgHandler func(domain.ChatMessage)) error {
 	if roomName == "" || username == "" {
 		return fmt.Errorf("room name and username cannot be empty")
 	}
 
-	// Subscribe to the room **only once** (if not already)
-	err := c.natsClient.SubscribeRoom(roomName, username, func(msg domain.ChatMessage) {
-		c.logger.Infof("Received message in room %s: %s", msg.Room, msg.Content)
-		c.forwardToHub(msg)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to subscribe to room %s: %w", roomName, err)
-	}
-
-	// Add user to the Redis room set
+	// Add user to Redis room
 	if err := c.redisClient.SAdd("room:"+roomName, username); err != nil {
-		return err
+		return fmt.Errorf("failed to add user to room: %w", err)
 	}
 
-	// Ensure the room is tracked in 'all_rooms'
+	// Track room in all_rooms
 	if err := c.redisClient.SAdd("all_rooms", roomName); err != nil {
-		return err
+		return fmt.Errorf("failed to track room: %w", err)
 	}
 
-	c.logger.Infof("%s joined room %s", username, roomName)
+	// Subscribe to NATS topic with the provided message handler
+	if err := c.natsClient.SubscribeRoom(roomName, username, func(msg domain.ChatMessage) {
+		// Don't send the message back to the sender
+		if msg.Sender != username {
+			msgHandler(msg)
+		}
+	}); err != nil {
+		return fmt.Errorf("failed to subscribe to NATS: %w", err)
+	}
+
+	// Notify room members
+	c.PublishMessage(domain.ChatMessage{
+		Type:      domain.MessageTypeSystem,
+		Content:   fmt.Sprintf("%s joined the room", username),
+		Room:      roomName,
+		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+	})
+
 	return nil
 }
 
@@ -97,21 +112,34 @@ func (c *chatService) LeaveRoom(roomName, username string) error {
 		return fmt.Errorf("room name and username cannot be empty")
 	}
 
-	// Remove user from the Redis room set
-	key := "room:" + roomName
-	err := c.redisClient.SRem(key, username)
-	if err != nil {
-		return err
+	// Notify room members before leaving
+	c.PublishMessage(domain.ChatMessage{
+		Type:      domain.MessageTypeSystem,
+		Content:   fmt.Sprintf("%s left the room", username),
+		Room:      roomName,
+		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+	})
+
+	// First unsubscribe from NATS
+	if err := c.natsClient.UnsubscribeRoom(roomName, username); err != nil {
+		c.logger.Errorf("failed to unsubscribe from room %s: %v", roomName, err)
+		// Continue execution - we still want to remove from Redis
 	}
 
-	// Check if there are no more members in the room.
-	members, _ := c.redisClient.SMembers(key)
-	if len(members) == 0 {
-		// Optional: remove the room from the 'all_rooms' set
-		_ = c.redisClient.SRem("all_rooms", roomName)
-		// Unsubscribe from NATS for this room since it's empty.
-		if err := c.natsClient.UnsubscribeRoom(roomName); err != nil {
-			c.logger.Errorf("Error unsubscribing room %s: %v", roomName, err)
+	// Remove user from the Redis room set
+	key := "room:" + roomName
+	if err := c.redisClient.SRem(key, username); err != nil {
+		return fmt.Errorf("failed to remove user from room in Redis: %w", err)
+	}
+
+	// Check if room is empty
+	members, err := c.redisClient.SMembers(key)
+	if err != nil {
+		c.logger.Errorf("failed to get room members: %v", err)
+	} else if len(members) == 0 {
+		// Room is empty, remove it from all_rooms
+		if err := c.redisClient.SRem("all_rooms", roomName); err != nil {
+			c.logger.Errorf("failed to remove empty room from all_rooms: %v", err)
 		}
 	}
 
@@ -126,16 +154,16 @@ func (c *chatService) ListAllRooms() ([]string, error) {
 	return c.redisClient.SMembers("all_rooms")
 }
 
-func (c *chatService) SwitchRoom(oldRoom, newRoom, username string) error {
-	if oldRoom != "" {
-		if err := c.LeaveRoom(oldRoom, username); err != nil {
-			return err
-		}
+func (c *chatService) SwitchRoom(oldRoom, newRoom, username string, msgHandler func(domain.ChatMessage)) error {
+	if err := c.LeaveRoom(oldRoom, username); err != nil {
+		return fmt.Errorf("failed to leave old room: %w", err)
 	}
-	return c.JoinRoom(newRoom, username)
-}
 
-func (c *chatService) forwardToHub(msg domain.ChatMessage) {
-	// Just stick it on the broadcast channel:
-	c.hub.Broadcast <- msg
+	if err := c.JoinRoom(newRoom, username, msgHandler); err != nil {
+		// Try to rejoin old room on failure
+		_ = c.JoinRoom(oldRoom, username, msgHandler)
+		return fmt.Errorf("failed to join new room: %w", err)
+	}
+
+	return nil
 }

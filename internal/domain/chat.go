@@ -3,14 +3,12 @@ package domain
 type MessageType string
 
 const (
-	MessageTypeChat         MessageType = "chat_message"
-	MessageTypeList         MessageType = "list_users"
-	MessageTypeListResponse MessageType = "list_users_response"
-
-	MessageTypeJoin          MessageType = "join_room"
-	MessageTypeLeave         MessageType = "leave_room"
-	MessageTypeRooms         MessageType = "list_rooms"
-	MessageTypeRoomsResponse MessageType = "list_rooms_response"
+	MessageTypeChat   MessageType = "chat_message"
+	MessageTypeSystem MessageType = "system_message" // Add this for system messages
+	MessageTypeList   MessageType = "list_users"
+	MessageTypeRooms  MessageType = "list_rooms"
+	MessageTypeJoin   MessageType = "join_room"
+	MessageTypeLeave  MessageType = "leave_room"
 )
 
 type ChatMessage struct {

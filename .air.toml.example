@@ -1,0 +1,20 @@
+[build]
+  dir      = "./"
+  cmd      = "go build -o tmp/main ./cmd/server/main.go"
+  bin      = "tmp/main"
+  full_bin = "tmp/main"
+  tmp_dir  = "tmp"
+  poll     = true            
+  include  = ["**/*.go"]
+  exclude  = ["tmp", "vendor", ".git"]
+
+[run]
+  cmd = "tmp/main --config config.json"
+
+[log]
+  time = true
+  level = "debug"
+
+[env]
+  ENV   = "development"
+  DEBUG = "true"

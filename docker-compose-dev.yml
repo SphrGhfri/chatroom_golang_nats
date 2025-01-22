@@ -7,14 +7,13 @@ services:
       - "8222:8222"
 
   redis:
-    # image: redis:6-alpine
     image: redis/redis-stack:latest
     container_name: "redis"
     ports:
       - "7379:6379"
       - "8003:8001"
     volumes:
-      - redis-volume:/data
+      - redis-dev-volume:/data
 
   server:
     build:
@@ -33,4 +32,4 @@ services:
     environment:
       - AIR_ENV=dev
 volumes:
-  redis-volume:
+  redis-dev-volume:
