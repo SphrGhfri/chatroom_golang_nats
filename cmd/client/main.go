@@ -8,26 +8,29 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// Matching server domain
-const (
-	MessageTypeChat          = "chat_message"
-	MessageTypeUsers         = "list_users"
-	MessageTypeUsersResponse = "list_users_response"
-	MessageTypeRooms         = "list_rooms"
-	MessageTypeRoomsResponse = "list_rooms_response"
-	MessageTypeJoin          = "join_room"
-	MessageTypeLeave         = "leave_room"
+// MessageType represents different types of messages that can be exchanged
+type MessageType string
 
-	MessageTypeUserExists = "username_exists"
+// Message types for client-server communication
+const (
+	MessageTypeChat          MessageType = "chat_message"
+	MessageTypeUsers         MessageType = "list_users"
+	MessageTypeUsersResponse MessageType = "list_users_response"
+	MessageTypeRooms         MessageType = "list_rooms"
+	MessageTypeRoomsResponse MessageType = "list_rooms_response"
+	MessageTypeJoin          MessageType = "join_room"
+	MessageTypeLeave         MessageType = "leave_room"
+	MessageTypeUserExists    MessageType = "username_exists"
 )
 
+// ChatMessage represents the structure of messages exchanged between client and server
 type ChatMessage struct {
 	Type      string `json:"type"`
 	Sender    string `json:"sender,omitempty"`
@@ -36,39 +39,70 @@ type ChatMessage struct {
 	Room      string `json:"room,omitempty"`
 }
 
-var addr = flag.String("addr", "localhost:8080", "http service address")
+// Client represents a chat client instance with its connection and state
+type Client struct {
+	conn        *websocket.Conn
+	username    string
+	currentRoom string
+	done        chan struct{}
+	mutex       sync.Mutex
+}
 
+// NewClient creates and initializes a new chat client
+func NewClient(conn *websocket.Conn, username string) *Client {
+	return &Client{
+		conn:        conn,
+		username:    username,
+		currentRoom: "global",
+		done:        make(chan struct{}),
+	}
+}
+
+// setCurrentRoom safely updates the client's current room
+func (c *Client) setCurrentRoom(room string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.currentRoom = room
+}
+
+// main initializes and runs the chat client
 func main() {
+	// Setup command line flags
+	addr := flag.String("addr", "localhost:8080", "server address")
 	flag.Parse()
 
+	// Initialize client connection
 	username := promptUsername()
-	conn := connectWebSocket(username)
+	conn := connectWebSocket(*addr, username)
+	if conn == nil {
+		os.Exit(1)
+	}
 	defer conn.Close()
 
-	// OS interrupt
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
-
-	done := make(chan struct{})
-	go readMessages(conn, done)
-
+	// Create and start client
+	client := NewClient(conn, username)
 	printHelp()
 
-	currentRoom := "global"
-	writeMessages(conn, username, &currentRoom, interrupt, done)
+	// Start message reader in background
+	go client.readMessages()
+
+	// Handle user input until program exits
+	client.handleInput()
 }
 
+// promptUsername asks the user to input their username
 func promptUsername() string {
-	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("Enter your username: ")
+	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
-	return scanner.Text()
+	return strings.TrimSpace(scanner.Text())
 }
 
-func connectWebSocket(username string) *websocket.Conn {
+// connectWebSocket establishes a WebSocket connection with the chat server
+func connectWebSocket(addr, username string) *websocket.Conn {
 	u := url.URL{
 		Scheme:   "ws",
-		Host:     *addr,
+		Host:     addr,
 		Path:     "/ws",
 		RawQuery: "username=" + url.QueryEscape(username),
 	}
@@ -76,128 +110,158 @@ func connectWebSocket(username string) *websocket.Conn {
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Printf("Failed to connect: %v", err)
+		return nil
 	}
-	log.Println("Connected.")
+	log.Println("Connected successfully")
 	return conn
 }
 
-func readMessages(conn *websocket.Conn, done chan struct{}) {
-	defer close(done)
+// readMessages continuously reads incoming messages from the WebSocket connection
+func (c *Client) readMessages() {
+	defer close(c.done)
 	for {
-		_, data, err := conn.ReadMessage()
+		_, data, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Printf("Read error: %v", err)
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				log.Printf("Read error: %v", err)
+			}
 			return
 		}
+
 		var msg ChatMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			log.Printf("JSON parse error: %v", err)
 			continue
 		}
 
-		switch msg.Type {
-		case MessageTypeChat:
-			fmt.Printf("\n[%s][%s] %s\n", msg.Timestamp, msg.Sender, msg.Content)
-
-		case MessageTypeUsersResponse:
-			fmt.Printf("\n[System] %s\n", msg.Content)
-
-		case MessageTypeRoomsResponse:
-			fmt.Printf("\n[System] %s\n", msg.Content)
-
-		case MessageTypeUserExists:
-			fmt.Printf("\n[System] %s\n", msg.Content)
-
-		default:
-			fmt.Printf("\n[Unknown] Type=%s Content=%s\n", msg.Type, msg.Content)
-		}
+		c.displayMessage(msg)
 	}
 }
 
-func writeMessages(conn *websocket.Conn, username string, currentRoom *string, interrupt chan os.Signal, done chan struct{}) {
+// displayMessage formats and displays received messages to the user
+func (c *Client) displayMessage(msg ChatMessage) {
+	switch MessageType(msg.Type) {
+	case MessageTypeChat:
+		fmt.Printf("\n[%s][%s] %s\n", msg.Timestamp, msg.Sender, msg.Content)
+	case MessageTypeUsersResponse, MessageTypeRoomsResponse, MessageTypeUserExists:
+		fmt.Printf("\n[System] %s\n", msg.Content)
+	default:
+		fmt.Printf("\n[Info] %s\n", msg.Content)
+	}
+	fmt.Print("> ")
+}
+
+// handleInput processes user input and handles command execution
+func (c *Client) handleInput() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		select {
-		case <-done:
+
+		fmt.Print("> ")
+		if !scanner.Scan() {
 			return
-		case <-interrupt:
-			log.Println("Interrupt received, closing connection...")
-			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			return
-		default:
-			if scanner.Scan() {
-				input := scanner.Text()
-				if strings.TrimSpace(input) == "" {
-					continue
-				}
-
-				var msg ChatMessage
-				fields := strings.Fields(input)
-
-				switch {
-				case strings.HasPrefix(input, "/users"):
-					msg.Type = MessageTypeUsers
-					if len(fields) == 2 {
-						msg.Room = fields[1]
-					}
-
-				case strings.HasPrefix(input, "/rooms"):
-					msg.Type = MessageTypeRooms
-
-				case strings.HasPrefix(input, "/join"):
-					if len(fields) < 2 {
-						fmt.Println("Usage: /join <roomName>")
-						continue
-					}
-					msg.Type = MessageTypeJoin
-					msg.Room = fields[1]
-					*currentRoom = fields[1]
-
-				case strings.HasPrefix(input, "/leave"):
-					msg.Type = MessageTypeLeave
-					msg.Room = *currentRoom
-					*currentRoom = "global"
-
-				case strings.HasPrefix(input, "/help"):
-					printHelp()
-
-				default:
-					// Normal chat
-					msg.Type = MessageTypeChat
-					msg.Sender = username
-					msg.Content = input
-					msg.Timestamp = time.Now().Format("2006-01-02 15:04:05")
-					msg.Room = *currentRoom
-				}
-
-				if err := conn.WriteJSON(msg); err != nil {
-					log.Printf("WriteJSON error: %v", err)
-					return
-				}
-
-				// optional local echo
-				if msg.Type == MessageTypeChat {
-					if msg.Room == "global" {
-						fmt.Printf("[Sent to GLOBAL] %s\n", input)
-					} else {
-						fmt.Printf("[Sent to %s] %s\n", msg.Room, input)
-					}
-				} else {
-					fmt.Printf("[Sent Command] %s\n", input)
-				}
-			}
 		}
+
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+
+		if err := c.processCommand(input); err != nil {
+			log.Printf("Error: %v", err)
+		}
+	}
+
+}
+
+// processCommand determines if input is a command or chat message and routes accordingly
+func (c *Client) processCommand(input string) error {
+	if len(input) == 0 {
+		return nil
+	}
+
+	if input[0] == '/' {
+		return c.handleCommand(strings.Fields(input))
+	}
+
+	return c.sendChatMessage(input)
+}
+
+// handleCommand processes special commands starting with '/'
+func (c *Client) handleCommand(fields []string) error {
+	cmd := fields[0]
+	switch cmd {
+	case "/help":
+		printHelp()
+		return nil
+
+	case "/users":
+		msg := ChatMessage{Type: string(MessageTypeUsers)}
+		if len(fields) == 2 {
+			msg.Room = fields[1]
+		}
+		return c.conn.WriteJSON(msg)
+
+	case "/rooms":
+		return c.conn.WriteJSON(ChatMessage{Type: string(MessageTypeRooms)})
+
+	case "/join":
+		if len(fields) < 2 {
+			return fmt.Errorf("usage: /join <roomName>")
+		}
+		c.setCurrentRoom(fields[1])
+		return c.conn.WriteJSON(ChatMessage{
+			Type: string(MessageTypeJoin),
+			Room: fields[1],
+		})
+
+	case "/leave":
+		msg := ChatMessage{
+			Type: string(MessageTypeLeave),
+			Room: c.currentRoom,
+		}
+		c.setCurrentRoom("global")
+		return c.conn.WriteJSON(msg)
+
+	default:
+		return fmt.Errorf("unknown command: %s", cmd)
 	}
 }
 
+// sendChatMessage sends a regular chat message to the current room
+func (c *Client) sendChatMessage(content string) error {
+	msg := ChatMessage{
+		Type:      string(MessageTypeChat),
+		Sender:    c.username,
+		Content:   content,
+		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+		Room:      c.currentRoom,
+	}
+
+	if err := c.conn.WriteJSON(msg); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	if c.currentRoom == "global" {
+		fmt.Printf("[Sent to GLOBAL] %s\n", content)
+	} else {
+		fmt.Printf("[Sent to %s] %s\n", c.currentRoom, content)
+	}
+	return nil
+}
+
+// printHelp displays available commands and their usage
 func printHelp() {
-	fmt.Println(`Commands:
-    /help
-    /users           -> list all active users
-    /users <room>    -> list all users in <room>
-    /rooms           -> list all active rooms
-    /join <room>     -> switch from your current room to <room>
-    /leave           -> go back to "global" room
-    Any other text   -> send a normal chat to your current room (default is "global").`)
+	fmt.Print(`
+Available Commands:
+    /help           -> show this help message
+    /users          -> list all active users
+    /users <room>   -> list users in specific room
+    /rooms          -> list all active rooms
+    /join <room>    -> join or switch to a room
+    /leave          -> leave current room (returns to global)
+    
+Just type your message to chat in the current room
+Current room is shown in your message confirmations
+`)
 }
