@@ -8,25 +8,32 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Subscribe user to a specific room
+// SubscribeRoom subscribes a user to a specific chat room
+// and filters out their own messages to prevent echo
+// subKey format: "roomName:username" is used to track unique subscriptions
 func (c *NATSClient) SubscribeRoom(roomName, username string, handleFunc func(domain.ChatMessage)) error {
+	// Lock to prevent concurrent modification of subscription map
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Create NATS subject using room name (e.g., "chat.room.general")
 	subject := fmt.Sprintf("chat.room.%s", roomName)
+	// Create unique subscription key to track user's room subscription
 	subKey := fmt.Sprintf("%s:%s", roomName, username)
 
-	// If this specific user is already subscribed to this room, do nothing
+	// Prevent duplicate subscriptions for same user in same room
 	if _, exists := c.SubMapping[subKey]; exists {
 		return nil
 	}
 
+	// Create subscription with message handler
 	sub, err := c.Conn.Subscribe(subject, func(msg *nats.Msg) {
+		// Decode incoming message
 		var chatMsg domain.ChatMessage
 		if err := json.Unmarshal(msg.Data, &chatMsg); err != nil {
-			return
+			return // Skip invalid messages
 		}
-		// Filter out messages from the same user at NATS level
+		// Only process messages from other users
 		if chatMsg.Sender != username {
 			handleFunc(chatMsg)
 		}
@@ -39,6 +46,9 @@ func (c *NATSClient) SubscribeRoom(roomName, username string, handleFunc func(do
 	return nil
 }
 
+// UnsubscribeRoom removes a user's subscription from a specific room
+// If the subscription doesn't exist, it returns nil
+// This ensures clean removal from both NATS server and local mapping
 func (c *NATSClient) UnsubscribeRoom(roomName, username string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -53,7 +63,9 @@ func (c *NATSClient) UnsubscribeRoom(roomName, username string) error {
 	return nil
 }
 
-// CleanupSubscriptions unsubscribes from all rooms
+// CleanupSubscriptions removes all active subscriptions for this client
+// Used during shutdown or when needing to reset all subscriptions
+// Ignores unsubscribe errors to ensure complete cleanup
 func (c *NATSClient) CleanupSubscriptions() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -4,7 +4,7 @@ type MessageType string
 
 const (
 	MessageTypeChat   MessageType = "chat_message"
-	MessageTypeSystem MessageType = "system_message" // Add this for system messages
+	MessageTypeSystem MessageType = "system_message"
 	MessageTypeList   MessageType = "list_users"
 	MessageTypeRooms  MessageType = "list_rooms"
 	MessageTypeJoin   MessageType = "join_room"

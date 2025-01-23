@@ -10,12 +10,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Core WebSocket configuration
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
 
+// Client represents a connected WebSocket client
 type Client struct {
 	conn        *websocket.Conn
 	username    string
@@ -24,55 +26,9 @@ type Client struct {
 	logger      logger.Logger
 }
 
-func newClient(conn *websocket.Conn, username string, chatService service.ChatService, logger logger.Logger) *Client {
-	return &Client{
-		conn:        conn,
-		username:    username,
-		currentRoom: "global",
-		chatService: chatService,
-		logger:      logger,
-	}
-}
+// === Core WebSocket Handler Functions ===
 
-func (c *Client) initialize() error {
-	if err := c.chatService.AddActiveUser(c.username); err != nil {
-		return fmt.Errorf("failed to add active user: %w", err)
-	}
-
-	if err := c.chatService.JoinRoom("global", c.username, c.handleMessage); err != nil {
-		c.chatService.RemoveActiveUser(c.username)
-		return fmt.Errorf("failed to join global room: %w", err)
-	}
-
-	return nil
-}
-
-func checkUsernameExists(username string, chatService service.ChatService, logger logger.Logger, conn *websocket.Conn) error {
-	exists, err := chatService.IsUserActive(username)
-	if err != nil {
-		logger.Errorf("failed to check username existence: %v", err)
-		return fmt.Errorf("internal server error")
-	}
-
-	if exists {
-		logger.Infof("username %s is already taken", username)
-		sendErrorMessageAndClose(conn, "username already exists")
-		return fmt.Errorf("username already exists")
-	}
-
-	return nil
-}
-
-// Add new error handling function
-func sendErrorMessageAndClose(conn *websocket.Conn, errMsg string) {
-	errorMessage := domain.ChatMessage{
-		Type:    domain.MessageTypeSystem,
-		Content: errMsg,
-	}
-	conn.WriteJSON(errorMessage)
-	conn.Close()
-}
-
+// HandleWebSocket is the main WebSocket connection handler
 func HandleWebSocket(chatService service.ChatService, logger logger.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		username := r.URL.Query().Get("username")
@@ -105,6 +61,7 @@ func HandleWebSocket(chatService service.ChatService, logger logger.Logger) http
 	}
 }
 
+// readPump handles incoming WebSocket messages
 func (c *Client) readPump() {
 	defer func() {
 		c.chatService.RemoveActiveUser(c.username)
@@ -138,6 +95,108 @@ func (c *Client) readPump() {
 	}
 }
 
+// === Client Lifecycle Management ===
+
+// newClient creates a new WebSocket client instance
+func newClient(conn *websocket.Conn, username string, chatService service.ChatService, logger logger.Logger) *Client {
+	return &Client{
+		conn:        conn,
+		username:    username,
+		currentRoom: "global",
+		chatService: chatService,
+		logger:      logger,
+	}
+}
+
+// initialize sets up the client's initial state
+func (c *Client) initialize() error {
+	if err := c.chatService.AddActiveUser(c.username); err != nil {
+		return fmt.Errorf("failed to add active user: %w", err)
+	}
+
+	if err := c.chatService.JoinRoom("global", c.username, c.handleMessage); err != nil {
+		c.chatService.RemoveActiveUser(c.username)
+		return fmt.Errorf("failed to join global room: %w", err)
+	}
+
+	return nil
+}
+
+// checkUsernameExists verifies if the username is already in use
+func checkUsernameExists(username string, chatService service.ChatService, logger logger.Logger, conn *websocket.Conn) error {
+	exists, err := chatService.IsUserActive(username)
+	if err != nil {
+		logger.Errorf("failed to check username existence: %v", err)
+		return fmt.Errorf("internal server error")
+	}
+
+	if exists {
+		logger.Infof("username %s is already taken", username)
+		sendErrorMessageAndClose(conn, "username already exists")
+		return fmt.Errorf("username already exists")
+	}
+
+	return nil
+}
+
+// === Message Handling Functions ===
+
+// handleMessage sends a message to the WebSocket client
+func (c *Client) handleMessage(msg domain.ChatMessage) {
+	if err := c.conn.WriteJSON(msg); err != nil {
+		c.logger.Errorf("failed to write message to websocket: %v", err)
+	}
+}
+
+// handleChatMessage processes and publishes chat messages
+func (c *Client) handleChatMessage(msg domain.ChatMessage) {
+	msg.Room = c.currentRoom
+	if err := c.chatService.PublishMessage(msg); err != nil {
+		c.logger.Errorf("failed to publish message: %v", err)
+	}
+}
+
+// sendSystemMessage sends system notifications to the client
+func (c *Client) sendSystemMessage(content string) {
+	c.handleMessage(domain.ChatMessage{
+		Type:    domain.MessageTypeSystem,
+		Content: content,
+	})
+}
+
+// sendErrorMessageAndClose sends an error message and closes the connection
+func sendErrorMessageAndClose(conn *websocket.Conn, errMsg string) {
+	errorMessage := domain.ChatMessage{
+		Type:    domain.MessageTypeSystem,
+		Content: errMsg,
+	}
+	conn.WriteJSON(errorMessage)
+	conn.Close()
+}
+
+// === Room Management Functions ===
+
+// handleJoinRoom processes room join requests
+func (c *Client) handleJoinRoom(newRoom string) {
+	if err := c.chatService.SwitchRoom(c.currentRoom, newRoom, c.username, c.handleMessage); err != nil {
+		c.logger.Errorf("failed to switch room: %v", err)
+		return
+	}
+	c.currentRoom = newRoom
+}
+
+// handleLeaveRoom processes room leave requests
+func (c *Client) handleLeaveRoom() {
+	if err := c.chatService.SwitchRoom(c.currentRoom, "global", c.username, c.handleMessage); err != nil {
+		c.logger.Errorf("failed to return to global: %v", err)
+		return
+	}
+	c.currentRoom = "global"
+}
+
+// === List/Query Functions ===
+
+// handleListCommand processes list commands for users
 func (c *Client) handleListCommand(msg domain.ChatMessage) {
 	if msg.Room != "" {
 		c.handleListRoomMembers(msg.Room)
@@ -146,6 +205,7 @@ func (c *Client) handleListCommand(msg domain.ChatMessage) {
 	}
 }
 
+// handleListRoomMembers retrieves and sends room member list
 func (c *Client) handleListRoomMembers(room string) {
 	users, err := c.chatService.ListRoomMembers(room)
 	if err != nil {
@@ -155,6 +215,7 @@ func (c *Client) handleListRoomMembers(room string) {
 	c.sendSystemMessage(fmt.Sprintf("Users in room %s: %v", room, users))
 }
 
+// handleListActiveUsers retrieves and sends active users list
 func (c *Client) handleListActiveUsers() {
 	users, err := c.chatService.ListActiveUsers()
 	if err != nil {
@@ -164,6 +225,7 @@ func (c *Client) handleListActiveUsers() {
 	c.sendSystemMessage(fmt.Sprintf("Active users: %v", users))
 }
 
+// handleListRooms retrieves and sends available rooms list
 func (c *Client) handleListRooms() {
 	rooms, err := c.chatService.ListAllRooms()
 	if err != nil {
@@ -171,40 +233,4 @@ func (c *Client) handleListRooms() {
 		return
 	}
 	c.sendSystemMessage(fmt.Sprintf("Available rooms: %v", rooms))
-}
-
-func (c *Client) handleJoinRoom(newRoom string) {
-	if err := c.chatService.SwitchRoom(c.currentRoom, newRoom, c.username, c.handleMessage); err != nil {
-		c.logger.Errorf("failed to switch room: %v", err)
-		return
-	}
-	c.currentRoom = newRoom
-}
-
-func (c *Client) handleLeaveRoom() {
-	if err := c.chatService.SwitchRoom(c.currentRoom, "global", c.username, c.handleMessage); err != nil {
-		c.logger.Errorf("failed to return to global: %v", err)
-		return
-	}
-	c.currentRoom = "global"
-}
-
-func (c *Client) handleChatMessage(msg domain.ChatMessage) {
-	msg.Room = c.currentRoom
-	if err := c.chatService.PublishMessage(msg); err != nil {
-		c.logger.Errorf("failed to publish message: %v", err)
-	}
-}
-
-func (c *Client) sendSystemMessage(content string) {
-	c.handleMessage(domain.ChatMessage{
-		Type:    domain.MessageTypeSystem,
-		Content: content,
-	})
-}
-
-func (c *Client) handleMessage(msg domain.ChatMessage) {
-	if err := c.conn.WriteJSON(msg); err != nil {
-		c.logger.Errorf("failed to write message to websocket: %v", err)
-	}
 }

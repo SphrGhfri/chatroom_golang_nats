@@ -17,6 +17,7 @@ import (
 	"github.com/SphrGhfri/chatroom_golang_nats/service"
 )
 
+// App represents the main application structure holding all dependencies
 type App struct {
 	cfg         config.Config
 	logger      logger.Logger
@@ -26,6 +27,7 @@ type App struct {
 	httpServer  *http.Server
 }
 
+// NewApp initializes and connects all application dependencies
 func NewApp(cfg config.Config) (*App, error) {
 	logg := logger.NewLogger(cfg.LogLevel)
 
@@ -58,6 +60,7 @@ func NewApp(cfg config.Config) (*App, error) {
 	return app, nil
 }
 
+// createHTTPServer sets up the HTTP server with WebSocket routes
 func createHTTPServer(cfg config.Config, chatService service.ChatService, logger logger.Logger) *http.Server {
 	wsConfig := ws.WSConfig{
 		ChatService: chatService,
@@ -70,6 +73,7 @@ func createHTTPServer(cfg config.Config, chatService service.ChatService, logger
 	}
 }
 
+// Start runs the application and handles graceful shutdown on signal
 func (a *App) Start() error {
 	go func() {
 		a.logger.Infof("Starting HTTP server on port %d", a.cfg.Port)
@@ -86,6 +90,7 @@ func (a *App) Start() error {
 	return a.Stop()
 }
 
+// Stop gracefully shuts down the server and closes all connections
 func (a *App) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
