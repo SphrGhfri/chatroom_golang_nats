@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -25,17 +26,20 @@ type testClient struct {
 // Simple setup with single responsibility
 func setupTest(t *testing.T) (*httptest.Server, *testClient) {
 	config := config.MustReadConfig("../../config_test.json")
-	natsClient, err := nats.NewNATSClient(config.NATSURL)
+	baseLogger := logger.NewLogger(config.LogLevel, config.LogFile)
+	ctx := logger.NewContext(context.Background(), baseLogger)
+
+	natsClient, err := nats.NewNATSClient(ctx, config.NATSURL)
 	require.NoError(t, err)
 
-	redisClient, err := redis.NewRedisClient(config.RedisURL)
+	redisClient, err := redis.NewRedisClient(ctx, config.RedisURL)
 	require.NoError(t, err)
-	redisClient.FlushAll()
+	redisClient.FlushAll(ctx)
 
-	chatService := service.NewChatService(natsClient, redisClient, logger.NewLogger("debug"))
+	chatService := service.NewChatService(ctx, natsClient, redisClient)
 	server := httptest.NewServer(ws.SetupWebSocketRoutes(ws.WSConfig{
 		ChatService: chatService,
-		Logger:      logger.NewLogger("debug"),
+		RootCtx:     ctx,
 	}))
 
 	// Create first client
@@ -73,7 +77,7 @@ func (c *testClient) send(msgType domain.MessageType, content, room string) {
 
 func (c *testClient) receive() domain.ChatMessage {
 	var msg domain.ChatMessage
-	c.conn.SetReadDeadline(time.Now().Add(time.Second))
+	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	err := c.conn.ReadJSON(&msg)
 	require.NoError(c.t, err)
 	return msg

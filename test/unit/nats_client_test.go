@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -11,17 +12,21 @@ import (
 	"github.com/SphrGhfri/chatroom_golang_nats/config"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/domain"
 	"github.com/SphrGhfri/chatroom_golang_nats/internal/nats"
+	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
 )
 
-func setupNATSClient(t *testing.T) *nats.NATSClient {
+func setupNATSClient(t *testing.T) (*nats.NATSClient, context.Context) {
 	config := config.MustReadConfig("../../config_test.json")
-	client, err := nats.NewNATSClient(config.NATSURL)
+	baseLogger := logger.NewLogger(config.LogLevel, config.LogFile)
+	ctx := logger.NewContext(context.Background(), baseLogger)
+
+	client, err := nats.NewNATSClient(ctx, config.NATSURL)
 	assert.NoError(t, err, "Failed to connect to NATS")
-	return client
+	return client, ctx
 }
 
 func TestSubscribeRoom(t *testing.T) {
-	natsClient := setupNATSClient(t)
+	natsClient, ctx := setupNATSClient(t)
 	defer natsClient.Close()
 
 	room := "test_room_subscribe"
@@ -30,7 +35,7 @@ func TestSubscribeRoom(t *testing.T) {
 	receivedMessages := make(chan domain.ChatMessage, 1)
 
 	// Subscribe to the room and wait for subscription to be ready
-	err := natsClient.SubscribeRoom(room, username, func(msg domain.ChatMessage) {
+	err := natsClient.SubscribeRoom(ctx, room, username, func(msg domain.ChatMessage) {
 		receivedMessages <- msg
 	})
 	assert.NoError(t, err, "Failed to subscribe to room")
@@ -46,7 +51,7 @@ func TestSubscribeRoom(t *testing.T) {
 	}
 
 	// Publish and wait briefly
-	err = natsClient.PublishRoom(room, testMsg)
+	err = natsClient.PublishRoom(ctx, room, testMsg)
 	assert.NoError(t, err, "Failed to publish message")
 	time.Sleep(100 * time.Millisecond) // Wait for message to be published
 
@@ -61,18 +66,18 @@ func TestSubscribeRoom(t *testing.T) {
 }
 
 func TestUnsubscribeRoom(t *testing.T) {
-	natsClient := setupNATSClient(t)
+	natsClient, ctx := setupNATSClient(t)
 	defer natsClient.Close()
 
 	room := "test_room_unsubscribe"
 	username := "test_user_unsubscribe"
 
 	// Subscribe first
-	err := natsClient.SubscribeRoom(room, username, func(msg domain.ChatMessage) {})
+	err := natsClient.SubscribeRoom(ctx, room, username, func(msg domain.ChatMessage) {})
 	assert.NoError(t, err, "Failed to subscribe to room")
 
 	// Unsubscribe and verify
-	err = natsClient.UnsubscribeRoom(room, username)
+	err = natsClient.UnsubscribeRoom(ctx, room, username)
 	assert.NoError(t, err, "Failed to unsubscribe from room")
 
 	// Verify subscription is removed
@@ -82,7 +87,7 @@ func TestUnsubscribeRoom(t *testing.T) {
 }
 
 func TestMultipleUsersInRoom(t *testing.T) {
-	natsClient := setupNATSClient(t)
+	natsClient, ctx := setupNATSClient(t)
 	defer natsClient.Close()
 
 	room := "test_multi_user_room"
@@ -93,7 +98,7 @@ func TestMultipleUsersInRoom(t *testing.T) {
 	// Setup two users
 	users := []string{"user1", "user2"}
 	for _, username := range users {
-		err := natsClient.SubscribeRoom(room, username, func(msg domain.ChatMessage) {
+		err := natsClient.SubscribeRoom(ctx, room, username, func(msg domain.ChatMessage) {
 			msgChan <- username
 		})
 		assert.NoError(t, err, fmt.Sprintf("Failed to subscribe user %s", username))
@@ -106,7 +111,7 @@ func TestMultipleUsersInRoom(t *testing.T) {
 		Room:      room,
 		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
 	}
-	err := natsClient.PublishRoom(room, testMsg)
+	err := natsClient.PublishRoom(ctx, room, testMsg)
 	assert.NoError(t, err, "Failed to publish message")
 
 	// Wait for both users to receive the message
@@ -127,7 +132,7 @@ func TestMultipleUsersInRoom(t *testing.T) {
 }
 
 func TestCleanupSubscriptions(t *testing.T) {
-	natsClient := setupNATSClient(t)
+	natsClient, ctx := setupNATSClient(t)
 	defer natsClient.Close()
 
 	// Create multiple subscriptions
@@ -138,7 +143,7 @@ func TestCleanupSubscriptions(t *testing.T) {
 	}
 
 	for username, room := range subscriptions {
-		err := natsClient.SubscribeRoom(room, username, func(msg domain.ChatMessage) {})
+		err := natsClient.SubscribeRoom(ctx, room, username, func(msg domain.ChatMessage) {})
 		assert.NoError(t, err, "Failed to create subscription")
 	}
 
@@ -150,7 +155,7 @@ func TestCleanupSubscriptions(t *testing.T) {
 }
 
 func TestPublishRoom(t *testing.T) {
-	natsClient := setupNATSClient(t)
+	natsClient, ctx := setupNATSClient(t)
 	defer natsClient.Close()
 
 	room := "test_publish_room"
@@ -170,7 +175,7 @@ func TestPublishRoom(t *testing.T) {
 		Room:      room,
 		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
 	}
-	err = natsClient.PublishRoom(room, testMsg)
+	err = natsClient.PublishRoom(ctx, room, testMsg)
 	assert.NoError(t, err, "Failed to publish message to room")
 
 	// Receive message
