@@ -10,7 +10,7 @@ services:
     image: redis:7.2
     container_name: "redis"
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:7379:6379"
     volumes:
       - redis-volume:/data
 
@@ -18,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: "chat_server"
+    container_name: "server"
     depends_on:
       - nats
       - redis
