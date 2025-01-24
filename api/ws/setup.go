@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/SphrGhfri/chatroom_golang_nats/pkg/logger"
@@ -9,11 +10,13 @@ import (
 
 type WSConfig struct {
 	ChatService service.ChatService
-	Logger      logger.Logger
+	RootCtx     context.Context
 }
 
 func SetupWebSocketRoutes(cfg WSConfig) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", HandleWebSocket(cfg.ChatService, cfg.Logger))
+	// Get logger from context for websocket module
+	log := logger.FromContext(cfg.RootCtx).WithModule("websocket")
+	mux.HandleFunc("/ws", HandleWebSocket(cfg.ChatService, cfg.RootCtx, log))
 	return mux
 }

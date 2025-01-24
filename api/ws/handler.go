@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -20,6 +21,8 @@ var upgrader = websocket.Upgrader{
 // Client represents a connected WebSocket client
 type Client struct {
 	conn        *websocket.Conn
+	ctx         context.Context
+	cancel      context.CancelFunc
 	username    string
 	currentRoom string
 	chatService service.ChatService
@@ -29,31 +32,43 @@ type Client struct {
 // === Core WebSocket Handler Functions ===
 
 // HandleWebSocket is the main WebSocket connection handler
-func HandleWebSocket(chatService service.ChatService, logger logger.Logger) http.HandlerFunc {
+func HandleWebSocket(chatService service.ChatService, rootCtx context.Context, log logger.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Create client-specific context
+		clientCtx, clientCancel := context.WithCancel(rootCtx)
+
 		username := r.URL.Query().Get("username")
+		clientLog := log.WithFields(map[string]interface{}{
+			"username":    username,
+			"remote_addr": r.RemoteAddr,
+		})
+
 		if username == "" {
+			clientLog.Warnf("Missing username in connection request")
 			http.Error(w, "username required", http.StatusBadRequest)
+			clientCancel()
 			return
 		}
 
-		// Upgrade connection first so we can send error messages through WebSocket
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			logger.Errorf("websocket upgrade failed: %v", err)
+			clientLog.Errorf("WebSocket upgrade failed: %v", err)
+			clientCancel()
 			return
 		}
 
-		// Check if username exists
-		if err := checkUsernameExists(username, chatService, logger, conn); err != nil {
+		// Check username with client context
+		if err := checkUsernameExists(clientCtx, username, chatService, clientLog, conn); err != nil {
 			sendErrorMessageAndClose(conn, err.Error())
+			clientCancel()
 			return
 		}
 
-		client := newClient(conn, username, chatService, logger)
+		client := newClient(clientCtx, clientCancel, conn, username, chatService, clientLog)
 		if err := client.initialize(); err != nil {
-			logger.Errorf("failed to initialize client: %v", err)
+			clientLog.Errorf("Failed to initialize client: %v", err)
 			sendErrorMessageAndClose(conn, "Failed to initialize connection")
+			clientCancel()
 			return
 		}
 
@@ -64,8 +79,9 @@ func HandleWebSocket(chatService service.ChatService, logger logger.Logger) http
 // readPump handles incoming WebSocket messages
 func (c *Client) readPump() {
 	defer func() {
-		c.chatService.RemoveActiveUser(c.username)
-		c.chatService.LeaveRoom(c.currentRoom, c.username)
+		c.cancel() // Cancel client context
+		c.chatService.RemoveActiveUser(c.ctx, c.username)
+		c.chatService.LeaveRoom(c.ctx, c.currentRoom, c.username)
 		c.conn.Close()
 	}()
 
@@ -98,24 +114,26 @@ func (c *Client) readPump() {
 // === Client Lifecycle Management ===
 
 // newClient creates a new WebSocket client instance
-func newClient(conn *websocket.Conn, username string, chatService service.ChatService, logger logger.Logger) *Client {
+func newClient(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, username string, chatService service.ChatService, log logger.Logger) *Client {
 	return &Client{
 		conn:        conn,
+		ctx:         ctx,
+		cancel:      cancel,
 		username:    username,
 		currentRoom: "global",
 		chatService: chatService,
-		logger:      logger,
+		logger:      log,
 	}
 }
 
 // initialize sets up the client's initial state
 func (c *Client) initialize() error {
-	if err := c.chatService.AddActiveUser(c.username); err != nil {
+	if err := c.chatService.AddActiveUser(c.ctx, c.username); err != nil {
 		return fmt.Errorf("failed to add active user: %w", err)
 	}
 
-	if err := c.chatService.JoinRoom("global", c.username, c.handleMessage); err != nil {
-		c.chatService.RemoveActiveUser(c.username)
+	if err := c.chatService.JoinRoom(c.ctx, "global", c.username, c.handleMessage); err != nil {
+		c.chatService.RemoveActiveUser(c.ctx, c.username)
 		return fmt.Errorf("failed to join global room: %w", err)
 	}
 
@@ -123,8 +141,8 @@ func (c *Client) initialize() error {
 }
 
 // checkUsernameExists verifies if the username is already in use
-func checkUsernameExists(username string, chatService service.ChatService, logger logger.Logger, conn *websocket.Conn) error {
-	exists, err := chatService.IsUserActive(username)
+func checkUsernameExists(ctx context.Context, username string, chatService service.ChatService, logger logger.Logger, conn *websocket.Conn) error {
+	exists, err := chatService.IsUserActive(ctx, username)
 	if err != nil {
 		logger.Errorf("failed to check username existence: %v", err)
 		return fmt.Errorf("internal server error")
@@ -151,7 +169,7 @@ func (c *Client) handleMessage(msg domain.ChatMessage) {
 // handleChatMessage processes and publishes chat messages
 func (c *Client) handleChatMessage(msg domain.ChatMessage) {
 	msg.Room = c.currentRoom
-	if err := c.chatService.PublishMessage(msg); err != nil {
+	if err := c.chatService.PublishMessage(c.ctx, msg); err != nil {
 		c.logger.Errorf("failed to publish message: %v", err)
 	}
 }
@@ -178,7 +196,7 @@ func sendErrorMessageAndClose(conn *websocket.Conn, errMsg string) {
 
 // handleJoinRoom processes room join requests
 func (c *Client) handleJoinRoom(newRoom string) {
-	if err := c.chatService.SwitchRoom(c.currentRoom, newRoom, c.username, c.handleMessage); err != nil {
+	if err := c.chatService.SwitchRoom(c.ctx, c.currentRoom, newRoom, c.username, c.handleMessage); err != nil {
 		c.logger.Errorf("failed to switch room: %v", err)
 		return
 	}
@@ -187,7 +205,7 @@ func (c *Client) handleJoinRoom(newRoom string) {
 
 // handleLeaveRoom processes room leave requests
 func (c *Client) handleLeaveRoom() {
-	if err := c.chatService.SwitchRoom(c.currentRoom, "global", c.username, c.handleMessage); err != nil {
+	if err := c.chatService.SwitchRoom(c.ctx, c.currentRoom, "global", c.username, c.handleMessage); err != nil {
 		c.logger.Errorf("failed to return to global: %v", err)
 		return
 	}
@@ -207,7 +225,7 @@ func (c *Client) handleListCommand(msg domain.ChatMessage) {
 
 // handleListRoomMembers retrieves and sends room member list
 func (c *Client) handleListRoomMembers(room string) {
-	users, err := c.chatService.ListRoomMembers(room)
+	users, err := c.chatService.ListRoomMembers(c.ctx, room)
 	if err != nil {
 		c.logger.Errorf("failed to list room members: %v", err)
 		return
@@ -217,7 +235,7 @@ func (c *Client) handleListRoomMembers(room string) {
 
 // handleListActiveUsers retrieves and sends active users list
 func (c *Client) handleListActiveUsers() {
-	users, err := c.chatService.ListActiveUsers()
+	users, err := c.chatService.ListActiveUsers(c.ctx)
 	if err != nil {
 		c.logger.Errorf("failed to list active users: %v", err)
 		return
@@ -227,7 +245,7 @@ func (c *Client) handleListActiveUsers() {
 
 // handleListRooms retrieves and sends available rooms list
 func (c *Client) handleListRooms() {
-	rooms, err := c.chatService.ListAllRooms()
+	rooms, err := c.chatService.ListAllRooms(c.ctx)
 	if err != nil {
 		c.logger.Errorf("failed to list rooms: %v", err)
 		return

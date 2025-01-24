@@ -3,12 +3,13 @@ module github.com/SphrGhfri/chatroom_golang_nats
 go 1.23.1
 
 require (
+	github.com/google/uuid v1.4.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.34.0
 	github.com/redis/go-redis/v9 v9.7.0
-	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/viper v1.19.0
 	github.com/stretchr/testify v1.9.0
+	go.uber.org/zap v1.21.0
 )
 
 require (
