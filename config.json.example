@@ -1,6 +1,7 @@
 {
   "port": 8080,
   "nats_url": "nats://nats:4222",
+  "redis_url": "redis://redis:6379",
   "log_level": "debug",
-  "redis_url": "redis://redis:6379"
+  "log_file": "server.log"
 }
