@@ -3,15 +3,15 @@ services:
     image: nats:2.10
     container_name: "nats"
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
 
   redis:
     image: redis/redis-stack:latest
     container_name: "redis"
     ports:
-      - "7379:6379"
-      - "8003:8001"
+      - "127.0.0.1:7379:6379"
+      - "127.0.0.1:8001:8001"
     volumes:
       - redis-dev-volume:/data
 
@@ -20,7 +20,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
-    container_name: "chat_server_dev"
+    container_name: "server_dev"
     depends_on:
       - nats
       - redis
@@ -31,5 +31,27 @@ services:
       - "./config.json:/app/config.json"
     environment:
       - AIR_ENV=dev
+
+  dozzle:
+    container_name: dozzle
+    image: amir20/dozzle:latest
+    depends_on:
+      - server_logs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "9999:8080"
+
+  server_logs:
+    container_name: server_dev_logs
+    image: alpine
+    depends_on:
+      - server
+    volumes:
+      - ./logs:/var/logs
+    command: "tail -f /var/logs/server.log"
+    network_mode: none
+    restart: unless-stopped
+
 volumes:
   redis-dev-volume:

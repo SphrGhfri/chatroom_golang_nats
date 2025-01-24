@@ -2,10 +2,15 @@ services:
   nats:
     image: nats:2.10
     container_name: "nats"
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
 
   redis:
     image: redis:7.2
     container_name: "redis"
+    ports:
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-volume:/data
 
@@ -21,6 +26,28 @@ services:
       - "8080:8080"
     volumes:
       - "./config.json:/app/config.json"
+      - "./logs:/app/logs"    # Direct mount of logs directory
+
+  dozzle:
+    container_name: dozzle
+    image: amir20/dozzle:latest
+    depends_on:
+      - server_logs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "9999:8080"
+
+  server_logs:
+    container_name: server_logs
+    image: alpine
+    depends_on:
+      - server
+    volumes:
+      - ./logs:/var/logs
+    command: "tail -f /var/logs/server.log"
+    network_mode: none
+    restart: unless-stopped
       
 volumes:
   redis-volume:
