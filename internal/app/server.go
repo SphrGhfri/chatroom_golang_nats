@@ -54,6 +54,15 @@ func NewApp(cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
+	// TODO: Improve logic for handling existing users in a distributed server setup
+	err = redisClient.FlushAll(rootCtx)
+	if err != nil {
+		rootCancel()
+		natsClient.Close()
+		redisClient.Close()
+		return nil, fmt.Errorf("failed to flush Redis: %w", err)
+	}
+
 	// Initialize chat service
 	chatService := service.NewChatService(rootCtx, natsClient, redisClient)
 

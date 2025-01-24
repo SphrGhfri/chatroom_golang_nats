@@ -43,7 +43,7 @@ func NewChatService(ctx context.Context, nc *nats.NATSClient, rc *redis.RedisCli
 	}
 }
 
-// If msg.Room is empty => publish to chat.events.global
+// publish to chat.events.<room>
 func (c *chatService) PublishMessage(ctx context.Context, msg domain.ChatMessage) error {
 	log := c.logger.WithContext(ctx).WithFields(map[string]interface{}{
 		"room":   msg.Room,
@@ -118,7 +118,7 @@ func (c *chatService) JoinRoom(ctx context.Context, roomName, username string, m
 	// Notify room members
 	c.PublishMessage(ctx, domain.ChatMessage{
 		Type:      domain.MessageTypeSystem,
-		Content:   fmt.Sprintf("%s joined the room", username),
+		Content:   fmt.Sprintf("%s joined the room %s", username, roomName),
 		Room:      roomName,
 		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
 	})
